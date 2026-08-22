@@ -20,25 +20,30 @@ data class SseEvent(val event: String?, val data: String)
 /**
  * Reads a server-sent-event body line by line and hands each record to [onEvent].
  * Returning false from [onEvent] stops reading early (used to abort on `[DONE]`).
+ *
+ * [onEvent] is suspending because every caller emits into a flow from it. That
+ * rules out `inline` (and with it a local `flush()` helper), so the record is
+ * dispatched inline at both flush points. Reads block, so call this on an IO
+ * dispatcher.
  */
-inline fun Response.forEachSseEvent(onEvent: (SseEvent) -> Boolean) {
+suspend fun Response.forEachSseEvent(onEvent: suspend (SseEvent) -> Boolean) {
     val source = body?.source() ?: return
     var eventName: String? = null
     val data = StringBuilder()
 
-    fun flush(): Boolean {
-        if (data.isEmpty() && eventName == null) return true
-        val payload = data.toString()
-        data.setLength(0)
-        val name = eventName
-        eventName = null
-        return onEvent(SseEvent(name, payload))
-    }
-
     while (!source.exhausted()) {
         val line = source.readUtf8Line() ?: break
         when {
-            line.isEmpty() -> if (!flush()) return
+            line.isEmpty() -> {
+                if (data.isNotEmpty() || eventName != null) {
+                    val payload = data.toString()
+                    data.setLength(0)
+                    val name = eventName
+                    eventName = null
+                    if (!onEvent(SseEvent(name, payload))) return
+                }
+            }
+
             line.startsWith(":") -> Unit // comment / keep-alive
             line.startsWith("event:") -> eventName = line.removePrefix("event:").trim()
             line.startsWith("data:") -> {
@@ -47,7 +52,11 @@ inline fun Response.forEachSseEvent(onEvent: (SseEvent) -> Boolean) {
             }
         }
     }
-    flush()
+
+    // A stream that ends without a blank line still has one record pending.
+    if (data.isNotEmpty() || eventName != null) {
+        onEvent(SseEvent(eventName, data.toString()))
+    }
 }
 
 /** Trims a trailing slash so callers can always concatenate with a leading slash. */

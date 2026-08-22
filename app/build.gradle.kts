@@ -79,6 +79,10 @@ dependencies {
 
     implementation(platform(libs.compose.bom))
     implementation(libs.compose.ui)
+    // Foundation is pulled in by material3 anyway, but BasicTextField, the scroll
+    // modifiers and LazyColumn are used directly — declare it rather than lean on
+    // a transitive dependency that could change.
+    implementation(libs.compose.foundation)
     implementation(libs.compose.ui.graphics)
     implementation(libs.compose.ui.tooling.preview)
     implementation(libs.compose.material3)

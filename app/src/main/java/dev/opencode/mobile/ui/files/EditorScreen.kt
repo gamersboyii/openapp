@@ -284,7 +284,9 @@ fun EditorScreen(relativePath: String, onBack: () -> Unit) {
                     textStyle = codeStyle.copy(color = MaterialTheme.colorScheme.onSurface),
                     cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
                     visualTransformation = transformation,
-                    softWrap = settings.wordWrap,
+                    // No softWrap parameter on this overload: wrapping falls out of
+                    // the width constraint. Inside horizontalScroll the field is
+                    // measured unbounded, so long lines extend instead of wrapping.
                     modifier = if (settings.wordWrap) {
                         Modifier.weight(1f).padding(horizontal = 12.dp, vertical = 12.dp)
                     } else {
