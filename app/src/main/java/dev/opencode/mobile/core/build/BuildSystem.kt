@@ -427,7 +427,7 @@ object Diagnostics {
         val found = ArrayList<Diagnostic>()
 
         lines.forEachIndexed { index, line ->
-            if (found.size >= MAX_DIAGNOSTICS) return
+            if (found.size >= MAX_DIAGNOSTICS) return found
             val trimmed = line.trim()
             if (trimmed.isEmpty() || trimmed.length > 500) return@forEachIndexed
 

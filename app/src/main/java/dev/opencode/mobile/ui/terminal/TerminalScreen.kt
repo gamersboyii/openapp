@@ -151,19 +151,20 @@ fun TerminalScreen(onBack: () -> Unit) {
             enabled = true,
             canRun = runs.count { it.isRunning } < TerminalService.MAX_CONCURRENT,
             onRun = {
-                val dir = project?.dir ?: return@onRun
-                val name = project?.name ?: "project"
-                try {
-                    terminal.start(
-                        command = input.trim(),
-                        projectDir = dir,
-                        projectName = name,
-                        origin = "user",
-                        timeoutSeconds = settings.commandTimeoutSeconds,
-                    )
-                    input = ""
-                } catch (failure: IllegalStateException) {
-                    error = failure.message
+                val currentProject = project
+                if (currentProject != null) {
+                    try {
+                        terminal.start(
+                            command = input.trim(),
+                            projectDir = currentProject.dir,
+                            projectName = currentProject.name,
+                            origin = "user",
+                            timeoutSeconds = settings.commandTimeoutSeconds,
+                        )
+                        input = ""
+                    } catch (failure: IllegalStateException) {
+                        error = failure.message
+                    }
                 }
             },
         )

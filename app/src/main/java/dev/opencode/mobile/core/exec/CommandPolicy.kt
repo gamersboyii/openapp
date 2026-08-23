@@ -74,7 +74,7 @@ object CommandPolicy {
         val trimmed = command.trim()
         if (trimmed.isEmpty()) return PolicyVerdict(PolicyDecision.BLOCK, "empty command")
 
-        BLOCK_PATTERNS.firstOrNull { it.containsMatchIn(trimmed) }?.let { (pattern, why) ->
+        BLOCK_PATTERNS.firstOrNull { it.first.containsMatchIn(trimmed) }?.let { (_, why) ->
             return PolicyVerdict(PolicyDecision.BLOCK, why)
         }
 
