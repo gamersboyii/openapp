@@ -265,6 +265,20 @@ fun SettingsScreen() {
                 onValue = { value -> store.update { it.copy(maxSteps = value.coerceIn(1, 100)) } },
             )
 
+            SettingSwitch(
+                title = "Auto checkpoint",
+                subtitle = "Snapshot the project before the agent's first change each turn, so a whole " +
+                    "turn can be reviewed or undone.",
+                checked = settings.autoCheckpoint,
+                onCheckedChange = { value -> store.update { it.copy(autoCheckpoint = value) } },
+            )
+
+            NumberRow(
+                title = "Keep last N checkpoints",
+                value = settings.maxCheckpoints,
+                onValue = { value -> store.update { it.copy(maxCheckpoints = value.coerceIn(1, 200)) } },
+            )
+
             // ---- editor ----------------------------------------------------
             SectionHeader("Editor")
 

@@ -33,6 +33,7 @@ import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Insights
 import androidx.compose.material.icons.filled.Send
@@ -81,6 +82,7 @@ import dev.opencode.mobile.agent.ToolRun
 import dev.opencode.mobile.agent.ToolStatus
 import dev.opencode.mobile.ui.components.CodeBlock
 import dev.opencode.mobile.ui.components.MarkdownText
+import dev.opencode.mobile.ui.review.TurnReviewBar
 import dev.opencode.mobile.ui.theme.MonoStyle
 import dev.opencode.mobile.ui.theme.StatusWarning
 import kotlinx.serialization.json.Json
@@ -103,6 +105,8 @@ fun ChatScreen(
     onOpenProjects: () -> Unit,
     onOpenPreview: () -> Unit,
     onOpenFile: (String) -> Unit,
+    onOpenReview: () -> Unit,
+    onOpenCheckpoints: () -> Unit,
 ) {
     val container = LocalContainer.current
     val agent = container.agent
@@ -110,6 +114,7 @@ fun ChatScreen(
     val entries by agent.entries.collectAsStateWithLifecycle()
     val isRunning by agent.isRunning.collectAsStateWithLifecycle()
     val approval by agent.pendingApproval.collectAsStateWithLifecycle()
+    val review by agent.pendingReview.collectAsStateWithLifecycle()
     val settings by container.settings.settings.collectAsStateWithLifecycle()
     val project by container.workspace.activeProject.collectAsStateWithLifecycle()
 
@@ -145,6 +150,9 @@ fun ChatScreen(
                 }
             },
             actions = {
+                IconButton(onClick = onOpenCheckpoints) {
+                    Icon(Icons.Filled.History, contentDescription = "Checkpoints")
+                }
                 IconButton(onClick = onOpenPreview) {
                     Icon(Icons.Filled.Visibility, contentDescription = "Preview")
                 }
@@ -176,6 +184,16 @@ fun ChatScreen(
                     }
                 }
             }
+        }
+
+        val currentReview = review
+        if (currentReview != null && !isRunning) {
+            TurnReviewBar(
+                review = currentReview,
+                onReview = onOpenReview,
+                onAccept = { agent.acceptReview() },
+                onUndo = { agent.undoTurn() },
+            )
         }
 
         Composer(

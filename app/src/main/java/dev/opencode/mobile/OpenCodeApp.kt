@@ -4,6 +4,7 @@ import android.app.Application
 import androidx.compose.runtime.staticCompositionLocalOf
 import dev.opencode.mobile.agent.AgentEngine
 import dev.opencode.mobile.core.build.BuildSystem
+import dev.opencode.mobile.core.checkpoint.CheckpointService
 import dev.opencode.mobile.core.exec.CommandHistoryStore
 import dev.opencode.mobile.core.exec.TerminalService
 import dev.opencode.mobile.core.fs.WorkspaceManager
@@ -28,6 +29,7 @@ class AppContainer(application: Application) {
     val workspace = WorkspaceManager(application)
     val git = GitService()
     val snapshots = RepoSnapshotService()
+    val checkpoints = CheckpointService()
     val preview = PreviewServer()
     val commandHistory = CommandHistoryStore(application)
     val terminal = TerminalService(application, commandHistory)
@@ -39,6 +41,7 @@ class AppContainer(application: Application) {
         workspace = workspace,
         git = git,
         snapshots = snapshots,
+        checkpoints = checkpoints,
         preview = preview,
         terminal = terminal,
         builds = builds,
@@ -58,6 +61,7 @@ class AppContainer(application: Application) {
         scope.launch {
             workspace.activeProject.collectLatest { project ->
                 agent.bindProject(project)
+                checkpoints.bind(project)
                 settings.update { it.copy(lastProjectPath = project?.path) }
                 if (project == null) {
                     preview.stop()

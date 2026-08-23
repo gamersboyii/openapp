@@ -29,6 +29,10 @@ data class AppSettings(
     val maxTokens: Int = 8192,
     /** Hard stop on the tool-use loop so a confused model cannot spin forever. */
     val maxSteps: Int = 24,
+    /** Snapshot the project before the first change of an agent turn. */
+    val autoCheckpoint: Boolean = true,
+    /** Oldest checkpoints past this count are pruned (with their unreferenced blobs). */
+    val maxCheckpoints: Int = 30,
     val gitUserName: String = "OpenCode Mobile",
     val gitUserEmail: String = "opencode@localhost",
     val gitUsername: String = "",

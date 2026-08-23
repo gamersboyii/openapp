@@ -33,10 +33,12 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import dev.opencode.mobile.LocalContainer
 import dev.opencode.mobile.ui.chat.ChatScreen
+import dev.opencode.mobile.ui.checkpoints.CheckpointsScreen
 import dev.opencode.mobile.ui.files.EditorScreen
 import dev.opencode.mobile.ui.files.FilesScreen
 import dev.opencode.mobile.ui.preview.PreviewScreen
 import dev.opencode.mobile.ui.projects.ProjectsScreen
+import dev.opencode.mobile.ui.review.ReviewScreen
 import dev.opencode.mobile.ui.settings.SettingsScreen
 import dev.opencode.mobile.ui.terminal.TerminalScreen
 
@@ -48,6 +50,8 @@ object Routes {
     const val SETTINGS = "settings"
     const val EDITOR = "editor"
     const val TERMINAL = "terminal"
+    const val REVIEW = "review"
+    const val CHECKPOINTS = "checkpoints"
 
     fun editor(path: String): String = "$EDITOR?path=${android.net.Uri.encode(path)}"
 }
@@ -74,10 +78,15 @@ fun AppRoot() {
 
     Scaffold(
         bottomBar = {
-            // The editor and terminal are full-screen pushes; hiding the bar
-            // there stops the keyboard and the nav bar fighting for the same space.
+            // The editor, terminal, review and checkpoints screens are full-screen
+            // pushes; hiding the bar there stops the keyboard and the nav bar
+            // fighting for the same space.
             val route = currentRoute
-            if (route?.startsWith(Routes.EDITOR) != true && route != Routes.TERMINAL) {
+            val fullScreen = route?.startsWith(Routes.EDITOR) == true ||
+                route == Routes.TERMINAL ||
+                route == Routes.REVIEW ||
+                route == Routes.CHECKPOINTS
+            if (!fullScreen) {
                 NavigationBar {
                     val destination = backStackEntry?.destination
                     tabs.forEach { tab ->
@@ -131,6 +140,8 @@ fun AppRoot() {
                         onOpenProjects = { navController.navigate(Routes.PROJECTS) },
                         onOpenPreview = { navController.navigate(Routes.PREVIEW) },
                         onOpenFile = { path -> navController.navigate(Routes.editor(path)) },
+                        onOpenReview = { navController.navigate(Routes.REVIEW) },
+                        onOpenCheckpoints = { navController.navigate(Routes.CHECKPOINTS) },
                     )
                 }
                 composable(Routes.FILES) {
@@ -146,6 +157,12 @@ fun AppRoot() {
                 composable(Routes.SETTINGS) { SettingsScreen() }
                 composable(Routes.TERMINAL) {
                     TerminalScreen(onBack = { navController.popBackStack() })
+                }
+                composable(Routes.REVIEW) {
+                    ReviewScreen(onBack = { navController.popBackStack() })
+                }
+                composable(Routes.CHECKPOINTS) {
+                    CheckpointsScreen(onBack = { navController.popBackStack() })
                 }
                 composable("${Routes.EDITOR}?path={path}") { entry ->
                     EditorScreen(

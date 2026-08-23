@@ -1,6 +1,8 @@
 package dev.opencode.mobile.agent
 
 import dev.opencode.mobile.core.build.BuildSystem
+import dev.opencode.mobile.core.checkpoint.Checkpoint
+import dev.opencode.mobile.core.checkpoint.CheckpointService
 import dev.opencode.mobile.core.exec.CommandPolicy
 import dev.opencode.mobile.core.exec.CommandHistoryStore
 import dev.opencode.mobile.core.exec.TerminalService
@@ -9,6 +11,7 @@ import dev.opencode.mobile.core.fs.WorkspaceManager
 import dev.opencode.mobile.core.git.GitService
 import dev.opencode.mobile.core.git.RepoSnapshotService
 import dev.opencode.mobile.core.preview.PreviewServer
+import dev.opencode.mobile.core.settings.AppSettings
 import dev.opencode.mobile.core.settings.SettingsStore
 import dev.opencode.mobile.llm.ChatMessage
 import dev.opencode.mobile.llm.LlmEvent
@@ -62,6 +65,19 @@ data class ApprovalRequest(
     val detail: String,
 )
 
+/**
+ * Set after an agent turn that changed files on disk. Carries just enough for the
+ * chat review bar; the review screen re-reads the live diff from [CheckpointService]
+ * against [checkpointId] so per-file reverts stay accurate.
+ */
+data class TurnReview(
+    val checkpointId: Long,
+    val label: String,
+    val fileCount: Int,
+    val added: Int,
+    val removed: Int,
+)
+
 @Serializable
 private data class SessionSnapshot(
     val entries: List<ChatEntry>,
@@ -80,6 +96,7 @@ class AgentEngine(
     private val workspace: WorkspaceManager,
     private val git: GitService,
     private val snapshots: RepoSnapshotService,
+    private val checkpoints: CheckpointService,
     private val preview: PreviewServer,
     private val terminal: TerminalService,
     private val builds: BuildSystem,
@@ -104,9 +121,18 @@ class AgentEngine(
     private val _pendingApproval = MutableStateFlow<ApprovalRequest?>(null)
     val pendingApproval: StateFlow<ApprovalRequest?> = _pendingApproval.asStateFlow()
 
+    private val _pendingReview = MutableStateFlow<TurnReview?>(null)
+    val pendingReview: StateFlow<TurnReview?> = _pendingReview.asStateFlow()
+
     private var approvalGate: CompletableDeferred<Boolean>? = null
     private var turnJob: Job? = null
     private var sessionDir: File? = null
+
+    // Snapshot taken before the first change of the current turn, and the project
+    // it belongs to, so the post-turn diff and any undo target the right tree.
+    private var turnCheckpoint: Checkpoint? = null
+    private var turnProject: Project? = null
+    private var turnReason: String = ""
 
     // ---- public API -------------------------------------------------------
 
@@ -131,15 +157,43 @@ class AgentEngine(
         _pendingApproval.value = null
     }
 
+    /** Keeps the turn's changes; the checkpoint stays available for a later undo. */
+    fun acceptReview() {
+        _pendingReview.value = null
+    }
+
+    /** Rolls the working tree back to the pre-turn checkpoint. Files, not chat, revert. */
+    fun undoTurn() {
+        val review = _pendingReview.value ?: return
+        val project = turnProject ?: workspace.activeProject.value ?: return
+        scope.launch {
+            val restored = runCatching { checkpoints.restore(project, review.checkpointId) }.getOrDefault(-1)
+            workspace.notifyChanged()
+            if (preview.state.value.running) preview.signalReload()
+            addNotice(
+                if (restored >= 0) "Reverted $restored files to ${review.label}."
+                else "Could not restore ${review.label} — the checkpoint may have been pruned.",
+            )
+            _pendingReview.value = null
+            persist()
+        }
+    }
+
     fun clear() {
         cancel()
         history.clear()
         _entries.value = emptyList()
+        _pendingReview.value = null
+        turnCheckpoint = null
+        turnProject = null
         scope.launch { persist() }
     }
 
     /** Swaps the transcript when the active project changes. */
     suspend fun bindProject(project: Project?) {
+        _pendingReview.value = null
+        turnCheckpoint = null
+        turnProject = null
         if (project == null) {
             sessionDir = null
             history.clear()
@@ -162,6 +216,12 @@ class AgentEngine(
         val settings = settingsStore.settings.value
         val provider = settings.activeProvider
         val model = settings.activeModel.ifBlank { provider?.defaultModel.orEmpty() }
+
+        // A fresh turn supersedes any unreviewed one; moving on accepts it implicitly.
+        _pendingReview.value = null
+        turnCheckpoint = null
+        turnProject = null
+        turnReason = userText.take(80)
 
         appendEntry(ChatEntry(id = nextId++, kind = EntryKind.USER, text = userText))
         history += ChatMessage(role = Role.USER, text = userText)
@@ -218,7 +278,32 @@ class AgentEngine(
             _isRunning.value = false
             _status.value = ""
             updateStreamingEntries()
+            finishTurnReview()
             persist()
+        }
+    }
+
+    /**
+     * Turns the pre-turn checkpoint into a reviewable diff. Runs [NonCancellable] so a
+     * stopped turn still surfaces (and can undo) whatever it managed to change. An empty
+     * diff means nothing was written, so the spurious checkpoint is dropped.
+     */
+    private suspend fun finishTurnReview() = withContext(NonCancellable + Dispatchers.IO) {
+        val checkpoint = turnCheckpoint ?: return@withContext
+        val project = turnProject ?: return@withContext
+        turnCheckpoint = null
+        val changes = runCatching { checkpoints.diff(project, checkpoint.id) }.getOrDefault(emptyList())
+        if (changes.isEmpty()) {
+            runCatching { checkpoints.delete(project, checkpoint.id) }
+            _pendingReview.value = null
+        } else {
+            _pendingReview.value = TurnReview(
+                checkpointId = checkpoint.id,
+                label = checkpoint.label,
+                fileCount = changes.size,
+                added = changes.sumOf { it.added },
+                removed = changes.sumOf { it.removed },
+            )
         }
     }
 
@@ -349,6 +434,8 @@ class AgentEngine(
 
         _status.value = summary
 
+        maybeCheckpoint(tool, settings)
+
         val context = ToolContext(
             workspace = workspace,
             git = git,
@@ -387,6 +474,26 @@ class AgentEngine(
         )
         workspace.notifyChanged()
         return if (isError) CallOutcome.FAILED else CallOutcome.DONE
+    }
+
+    /** Snapshots the tree before the first mutating action of a turn (once per turn). */
+    private suspend fun maybeCheckpoint(tool: AgentTool, settings: AppSettings) {
+        if (turnCheckpoint != null || !settings.autoCheckpoint) return
+        val mutates = tool.mutating ||
+            tool.name == RunCommandTool.name ||
+            tool.name == BuildProjectTool.name
+        if (!mutates) return
+        val project = workspace.activeProject.value ?: return
+        val checkpoint = runCatching {
+            checkpoints.capture(
+                project = project,
+                reason = turnReason,
+                retain = settings.maxCheckpoints,
+            )
+        }.getOrNull() ?: return
+        turnCheckpoint = checkpoint
+        turnProject = project
+        addNotice("${checkpoint.label} saved before changes.")
     }
 
     private fun approvalDetail(tool: AgentTool, args: kotlinx.serialization.json.JsonObject): String =
