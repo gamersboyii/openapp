@@ -225,6 +225,23 @@ fun SettingsScreen() {
                 onCheckedChange = { value -> store.update { it.copy(autoApproveWrites = value) } },
             )
 
+            SettingSwitch(
+                title = "Auto-approve commands",
+                subtitle =
+                    "Run non-read-only terminal commands and build steps without asking. " +
+                        "Blocked commands are still refused.",
+                checked = settings.autoApproveCommands,
+                onCheckedChange = { value -> store.update { it.copy(autoApproveCommands = value) } },
+            )
+
+            NumberRow(
+                title = "Command timeout (seconds)",
+                value = settings.commandTimeoutSeconds,
+                onValue = { value ->
+                    store.update { it.copy(commandTimeoutSeconds = value.coerceIn(10, 1800)) }
+                },
+            )
+
             SliderRow(
                 title = "Temperature",
                 value = settings.temperature.toFloat(),

@@ -1,11 +1,14 @@
 package dev.opencode.mobile.agent
 
+import dev.opencode.mobile.core.build.BuildSystem
+import dev.opencode.mobile.core.exec.CommandHistoryStore
 import dev.opencode.mobile.core.fs.Project
 import dev.opencode.mobile.core.fs.WorkspaceManager
 import dev.opencode.mobile.core.git.GitService
 import dev.opencode.mobile.core.git.RepoSnapshotService
 import dev.opencode.mobile.core.preview.PreviewServer
 import dev.opencode.mobile.core.settings.AppSettings
+import dev.opencode.mobile.core.exec.TerminalService
 import dev.opencode.mobile.llm.ToolSpec
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -22,6 +25,9 @@ class ToolContext(
     val git: GitService,
     val snapshots: RepoSnapshotService,
     val preview: PreviewServer,
+    val terminal: TerminalService,
+    val builds: BuildSystem,
+    val history: CommandHistoryStore,
     val settings: AppSettings,
     /** Active project. Null until one is created or opened. */
     val project: Project?,
@@ -44,6 +50,14 @@ interface AgentTool {
 
     /** Mutating tools are gated behind user approval unless auto-approve is on. */
     val mutating: Boolean get() = false
+
+    /**
+     * Whether this call needs user approval before it runs. The default gates
+     * [mutating] tools; tools with per-call policies (like run_command)
+     * override this and decide from their arguments.
+     */
+    fun needsApproval(args: JsonObject, settings: AppSettings): Boolean =
+        mutating && !settings.autoApproveWrites
 
     suspend fun execute(args: JsonObject, context: ToolContext): String
 

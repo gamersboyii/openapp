@@ -3,6 +3,9 @@ package dev.opencode.mobile
 import android.app.Application
 import androidx.compose.runtime.staticCompositionLocalOf
 import dev.opencode.mobile.agent.AgentEngine
+import dev.opencode.mobile.core.build.BuildSystem
+import dev.opencode.mobile.core.exec.CommandHistoryStore
+import dev.opencode.mobile.core.exec.TerminalService
 import dev.opencode.mobile.core.fs.WorkspaceManager
 import dev.opencode.mobile.core.git.AndroidSystemReader
 import dev.opencode.mobile.core.git.GitService
@@ -26,6 +29,9 @@ class AppContainer(application: Application) {
     val git = GitService()
     val snapshots = RepoSnapshotService()
     val preview = PreviewServer()
+    val commandHistory = CommandHistoryStore(application)
+    val terminal = TerminalService(application, commandHistory)
+    val builds = BuildSystem()
 
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
@@ -34,12 +40,16 @@ class AppContainer(application: Application) {
         git = git,
         snapshots = snapshots,
         preview = preview,
+        terminal = terminal,
+        builds = builds,
+        commandHistory = commandHistory,
         settingsStore = settings,
         scope = scope,
     )
 
     fun bootstrap() {
         scope.launch {
+            commandHistory.load()
             workspace.refresh()
             settings.settings.value.lastProjectPath?.let { workspace.selectByPath(it) }
         }

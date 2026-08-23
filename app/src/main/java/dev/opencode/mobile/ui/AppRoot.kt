@@ -38,6 +38,7 @@ import dev.opencode.mobile.ui.files.FilesScreen
 import dev.opencode.mobile.ui.preview.PreviewScreen
 import dev.opencode.mobile.ui.projects.ProjectsScreen
 import dev.opencode.mobile.ui.settings.SettingsScreen
+import dev.opencode.mobile.ui.terminal.TerminalScreen
 
 object Routes {
     const val CHAT = "chat"
@@ -46,6 +47,7 @@ object Routes {
     const val PROJECTS = "projects"
     const val SETTINGS = "settings"
     const val EDITOR = "editor"
+    const val TERMINAL = "terminal"
 
     fun editor(path: String): String = "$EDITOR?path=${android.net.Uri.encode(path)}"
 }
@@ -72,9 +74,10 @@ fun AppRoot() {
 
     Scaffold(
         bottomBar = {
-            // The editor is a full-screen push; hiding the bar there stops the
-            // keyboard and the nav bar fighting for the same space.
-            if (currentRoute?.startsWith(Routes.EDITOR) != true) {
+            // The editor and terminal are full-screen pushes; hiding the bar
+            // there stops the keyboard and the nav bar fighting for the same space.
+            val route = currentRoute
+            if (route?.startsWith(Routes.EDITOR) != true && route != Routes.TERMINAL) {
                 NavigationBar {
                     val destination = backStackEntry?.destination
                     tabs.forEach { tab ->
@@ -131,13 +134,19 @@ fun AppRoot() {
                     )
                 }
                 composable(Routes.FILES) {
-                    FilesScreen(onOpenFile = { path -> navController.navigate(Routes.editor(path)) })
+                    FilesScreen(
+                        onOpenFile = { path -> navController.navigate(Routes.editor(path)) },
+                        onOpenTerminal = { navController.navigate(Routes.TERMINAL) },
+                    )
                 }
                 composable(Routes.PREVIEW) { PreviewScreen() }
                 composable(Routes.PROJECTS) {
                     ProjectsScreen(onOpenChat = { navController.navigate(Routes.CHAT) })
                 }
                 composable(Routes.SETTINGS) { SettingsScreen() }
+                composable(Routes.TERMINAL) {
+                    TerminalScreen(onBack = { navController.popBackStack() })
+                }
                 composable("${Routes.EDITOR}?path={path}") { entry ->
                     EditorScreen(
                         relativePath = entry.arguments?.getString("path").orEmpty(),

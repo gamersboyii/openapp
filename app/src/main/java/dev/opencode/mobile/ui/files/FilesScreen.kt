@@ -29,6 +29,7 @@ import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.NoteAdd
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
@@ -63,7 +64,7 @@ import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun FilesScreen(onOpenFile: (String) -> Unit) {
+fun FilesScreen(onOpenFile: (String) -> Unit, onOpenTerminal: () -> Unit = {}) {
     val container = LocalContainer.current
     val workspace = container.workspace
     val scope = rememberCoroutineScope()
@@ -125,6 +126,9 @@ fun FilesScreen(onOpenFile: (String) -> Unit) {
                 }
             },
             actions = {
+                IconButton(onClick = onOpenTerminal, enabled = project != null) {
+                    Icon(Icons.Filled.Terminal, contentDescription = "Terminal")
+                }
                 IconButton(onClick = { searching = !searching }) {
                     Icon(
                         if (searching) Icons.Filled.Close else Icons.Filled.Search,

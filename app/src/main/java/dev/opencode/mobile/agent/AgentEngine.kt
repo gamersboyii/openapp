@@ -1,5 +1,9 @@
 package dev.opencode.mobile.agent
 
+import dev.opencode.mobile.core.build.BuildSystem
+import dev.opencode.mobile.core.exec.CommandPolicy
+import dev.opencode.mobile.core.exec.CommandHistoryStore
+import dev.opencode.mobile.core.exec.TerminalService
 import dev.opencode.mobile.core.fs.Project
 import dev.opencode.mobile.core.fs.WorkspaceManager
 import dev.opencode.mobile.core.git.GitService
@@ -77,6 +81,9 @@ class AgentEngine(
     private val git: GitService,
     private val snapshots: RepoSnapshotService,
     private val preview: PreviewServer,
+    private val terminal: TerminalService,
+    private val builds: BuildSystem,
+    private val commandHistory: CommandHistoryStore,
     private val settingsStore: SettingsStore,
     private val scope: CoroutineScope,
 ) {
@@ -305,7 +312,7 @@ class AgentEngine(
         }
 
         val summary = runCatching { tool.summarize(args) }.getOrDefault(tool.name)
-        val needsApproval = tool.mutating && !settings.autoApproveWrites
+        val needsApproval = tool.needsApproval(args, settings)
         val entryId = recordToolEntry(
             call = call,
             summary = summary,
@@ -347,6 +354,9 @@ class AgentEngine(
             git = git,
             snapshots = snapshots,
             preview = preview,
+            terminal = terminal,
+            builds = builds,
+            history = commandHistory,
             settings = settings,
             project = workspace.activeProject.value,
             onProgress = { progress -> _status.value = "$summary — $progress" },
@@ -394,6 +404,17 @@ class AgentEngine(
                 appendLine("+ " + args.str("new_string").orEmpty().take(600).replace("\n", "\n+ "))
             }
 
+            RunCommandTool.name -> {
+                val command = args.str("command").orEmpty()
+                val verdict = CommandPolicy.classify(command)
+                "$ $command\n\nPolicy: ${verdict.decision} — ${verdict.reason}"
+            }
+
+            BuildProjectTool.name -> {
+                val action = args.str("action") ?: "detect"
+                "Runs the '$action' lifecycle step for this project's detected type."
+            }
+
             else -> args.entries
                 .filter { it.key != "content" }
                 .joinToString("\n") { "${it.key}: ${it.value.toString().take(300)}" }
@@ -438,8 +459,20 @@ class AgentEngine(
                 you need, make the edit, then say what changed in one or two sentences.
 
                 ENVIRONMENT — read this carefully, it is unusual:
-                - There is NO shell, NO Node.js, NO npm/yarn/pnpm, NO Python, NO compiler.
-                  You cannot run commands or build steps. Never suggest `npm install`.
+                - Commands run through `run_command` on the phone's Android shell
+                  (toybox) inside a sandbox: working directory pinned to the project,
+                  fixed PATH, hard timeout, output caps. Basic inspection works
+                  (ls, cat, grep, find, wc). There is NO Node.js/npm, NO Python,
+                  NO JDK/Gradle, NO cargo/go installed — ecosystem installs and
+                  builds fail with 'not found'. Never pretend a build succeeded.
+                - Every command is classified before it runs: read-only commands run
+                  immediately; anything that writes or installs asks the user;
+                  destructive commands and access outside the project are blocked.
+                  If a command was blocked, do not retry variations of it.
+                - `build_project` detects the project type and runs detect/install/
+                  build/test/run/clean, returning structured file:line diagnostics.
+                  Read them, fix the named files, then build again. For static web
+                  projects there is nothing to compile — use `preview` instead.
                 - Web projects must work by opening an HTML file directly. Get dependencies
                   from a CDN (esm.sh, unpkg, jsdelivr) using an import map, or use a global
                   script build. For React, JSX is compiled in-page by @babel/standalone.
@@ -477,6 +510,12 @@ class AgentEngine(
                 appendLine("File writes are auto-approved; the user is not asked before each change.")
             } else {
                 appendLine("Every mutating tool call is shown to the user for approval before it runs.")
+            }
+
+            if (settings.autoApproveCommands) {
+                appendLine("Non-read-only commands and build steps are auto-approved after policy screening.")
+            } else {
+                appendLine("Commands that are not read-only are shown to the user for approval first.")
             }
 
             if (settings.customInstructions.isNotBlank()) {

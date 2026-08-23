@@ -2,7 +2,7 @@
 
 Android app: an AI coding agent that runs entirely on the phone. Repo
 [gamersboyii/openapp](https://github.com/gamersboyii/openapp), package
-`dev.opencode.mobile`, ~7.9k lines of Kotlin across 29 files.
+`dev.opencode.mobile`, ~9.2k lines of Kotlin across 34 files.
 
 ## Hard constraints (do not violate)
 
@@ -50,10 +50,11 @@ printf 'protocol=https\nhost=github.com\n\n' | git credential fill
 Manual service locator, no DI framework. `AppContainer` in
 [OpenCodeApp.kt](app/src/main/java/dev/opencode/mobile/OpenCodeApp.kt) builds
 every app-lifetime singleton — `settings`, `workspace`, `git`, `snapshots`,
-`preview`, `scope`, `agent` — and is handed to Compose through
-`LocalContainer` (a `staticCompositionLocalOf`). `bootstrap()` restores the last
-project and keeps the agent transcript, remembered path, and preview root in step
-with `workspace.activeProject`.
+`preview`, `commandHistory`, `terminal`, `builds`, `scope`, `agent` — and is
+handed to Compose through `LocalContainer` (a `staticCompositionLocalOf`).
+`bootstrap()` restores the last project and the command history, and keeps the
+agent transcript, remembered path, and preview root in step with
+`workspace.activeProject`.
 
 `OpenCodeApp.onCreate` calls `AndroidSystemReader.install(filesDir)` **before**
 `AppContainer` is constructed. JGit otherwise probes `$HOME/.gitconfig` and
@@ -66,19 +67,22 @@ ViewModels — screens hold local `remember` state and read the container.
 
 | Path | Role |
 | --- | --- |
-| `agent/AgentEngine.kt` (553) | tool-calling loop, transcript, approval gate, session persistence |
-| `agent/Tools.kt` (522) | 19 `AgentTool` objects + `ToolRegistry` |
-| `agent/Tool.kt` (103) | `AgentTool`/`ToolContext` contracts, JSON arg + schema helpers |
+| `agent/AgentEngine.kt` (~590) | tool-calling loop, transcript, approval gate, session persistence |
+| `agent/Tools.kt` (~640) | 21 `AgentTool` objects + `ToolRegistry` |
+| `agent/Tool.kt` (~120) | `AgentTool`/`ToolContext` contracts, JSON arg + schema helpers, dynamic `needsApproval` |
 | `agent/Templates.kt` (538) | 6 zero-build project templates |
 | `core/fs/WorkspaceManager.kt` (317) | sandboxed file ops, search, zip export |
+| `core/exec/TerminalService.kt` (~360) | sandboxed `sh -c` execution: process registry, timeouts, output caps, history store |
+| `core/exec/CommandPolicy.kt` (~150) | SAFE / ASK / BLOCK command classifier |
+| `core/build/BuildSystem.kt` (~475) | project-type detection + build/test/run/clean with structured diagnostics |
 | `core/git/GitService.kt` (239) | JGit clone/status/commit/log/diff/branch/pull/push |
 | `core/git/RepoSnapshotService.kt` (118) | zip-archive download alternative to clone |
 | `core/git/AndroidSystemReader.kt` (60) | JGit `SystemReader` replacement |
 | `core/preview/PreviewServer.kt` (232) | NanoHTTPD loopback server + live reload |
-| `core/settings/SettingsStore.kt` (125) | `AppSettings` as one JSON blob in EncryptedSharedPreferences |
+| `core/settings/SettingsStore.kt` (~130) | `AppSettings` as one JSON blob in EncryptedSharedPreferences |
 | `core/util/Highlighter.kt` (177) | regex syntax highlighting |
 | `llm/` (5 files) | provider registry, 3 wire protocols, SSE reader |
-| `ui/` (9 files) | Compose screens + theme + shared components |
+| `ui/` (10 files) | Compose screens (incl. terminal) + theme + shared components |
 
 ### Agent loop
 
@@ -88,8 +92,11 @@ the model stops calling tools or `settings.maxSteps` (default 24) is hit.
 
 - `entries: StateFlow<List<ChatEntry>>` drives the UI; `history` holds the raw
   `ChatMessage` list sent to the model.
-- Approval: `needsApproval = tool.mutating && !settings.autoApproveWrites`. The
-  engine parks on a `CompletableDeferred<Boolean>` exposed as
+- Approval: tools decide per call via `needsApproval(args, settings)` — default
+  is `mutating && !settings.autoApproveWrites`; `run_command` and
+  `build_project` override it with the CommandPolicy verdict and
+  `settings.autoApproveCommands`. The engine parks on a
+  `CompletableDeferred<Boolean>` exposed as
   `pendingApproval: StateFlow<ApprovalRequest?>`; the UI calls
   `respondToApproval(Boolean)`.
 - Session is persisted to `<project>/.opencode/session.json`
@@ -98,11 +105,52 @@ the model stops calling tools or `settings.maxSteps` (default 24) is hit.
   `git_diff`, `git_log`, `preview`) are not gated. Mutating: `write_file`,
   `edit_file`, `delete_path`, `create_directory`, `create_project`, `git_clone`,
   `fetch_repo_snapshot`, `git_init`, `git_commit`, `git_push`, `git_pull`.
+- `run_command` executes through the sandboxed terminal; BLOCK-classified
+  commands return an ERROR to the model without ever prompting. SAFE ones run
+  silently. ASK prompts unless auto-approve commands is on.
+- `build_project` gates every action except `detect`.
 
 Adding a tool: implement `AgentTool` (`name`, `description`, `parameters` via
 `schema(...)`/`stringProp`/`boolProp`/`intProp`, `execute`, `summarize`, and
-`mutating = true` if it writes), then register it in `ToolRegistry.tools`.
-`ToolContext.requireProject()` throws a message aimed at the model, not the user.
+`mutating = true` / a custom `needsApproval` if it acts), then register it in
+`ToolRegistry.tools`. `ToolContext.requireProject()` throws a message aimed at
+the model, not the user.
+
+### Terminal & build
+
+[TerminalService.kt](app/src/main/java/dev/opencode/mobile/core/exec/TerminalService.kt)
+runs everything through `sh -c` with the working directory pinned to the active
+project, a fixed minimal environment (`PATH` = system toybox only), per-stream
+output caps (200k chars), a hard timeout (`settings.commandTimeoutSeconds`),
+SIGTERM-then-kill cancellation, and at most 3 concurrent processes. The real
+security boundary is Android's own app sandbox; CommandPolicy is the layer that
+stops bad commands before they start.
+
+[CommandPolicy.kt](app/src/main/java/dev/opencode/mobile/core/exec/CommandPolicy.kt)
+classifies segment-by-segment (pipes, `&&`, `;`): read-only allowlist → SAFE,
+everything else → ASK, destructive patterns / absolute paths outside the
+approved prefixes → BLOCK. Conservative by design: unknown means ASK, never
+SAFE. Watch for accidental escape hatches when adding commands to the allowlist
+(`env`, bare `find -exec`, `git config` without `--get` were all removed once).
+
+[BuildSystem.kt](app/src/main/java/dev/opencode/mobile/core/build/BuildSystem.kt)
+detects project type from marker files (gradle/android, maven,
+package.json→next/vite/react/node, python, cargo, go, static web) and runs
+install/build/test/run/clean recipes through the terminal, returning structured
+`BuildOutcome`s with regex-parsed diagnostics (Kotlin `e:` lines, javac, tsc,
+Rust `-->`, flake8, gcc, Python tracebacks). On a stock phone the heavy
+toolchains are absent — outcomes say so honestly rather than faking success.
+The agent loop for builds: detect → install → build → read diagnostics → fix →
+rebuild → test.
+
+### Terminal UI
+
+`ui/terminal/TerminalScreen.kt` is a full-screen push from the Files tab (not a
+bottom tab). It lists running processes with stop buttons, renders stdout in
+muted mono and stderr in error color, shows the live policy verdict under the
+input as a hint, and reads persisted history from `terminal_history.json`
+(app filesDir, capped at 100 entries). User-typed commands skip policy gating;
+the badge is informational only.
 
 ### LLM layer
 
@@ -156,8 +204,8 @@ browser via `rememberUrlOpener()`.
 ### UI
 
 `ui/AppRoot.kt` — five bottom-nav tabs (chat, files, preview, projects,
-settings) plus `editor?path={path}` as a full-screen push that hides the nav bar.
-`Routes.editor(path)` URI-encodes the path. A global
+settings) plus `editor?path={path}` and `terminal` as full-screen pushes that
+hide the nav bar. `Routes.editor(path)` URI-encodes the path. A global
 `LinearProgressIndicator` + status line show while `agent.isRunning`.
 
 Editor specifics ([EditorScreen.kt](app/src/main/java/dev/opencode/mobile/ui/files/EditorScreen.kt)):
@@ -206,8 +254,12 @@ Editor specifics ([EditorScreen.kt](app/src/main/java/dev/opencode/mobile/ui/fil
 
 ## Known gaps
 
-- No bundler-based dev servers (constraint 2).
+- No bundler-based dev servers (constraint 2). Terminal commands are limited to
+  the phone's toybox shell — npm/python/jdk/cargo/go are absent, so ecosystem
+  install/build recipes fail honestly with "not found".
 - Clone/push HTTPS only; no SSH keys.
 - Repo snapshots have no `.git`, so they cannot be committed or pushed.
 - Highlighter disables itself past `MAX_CHARS` (120_000).
 - Debug signing only; no release config, no tests, no lint baseline.
+- Killing a compound `sh -c` command can orphan grandchildren until their pipes
+  close; Android reaps them eventually.

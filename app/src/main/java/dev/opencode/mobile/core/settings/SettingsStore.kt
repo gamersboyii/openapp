@@ -21,6 +21,10 @@ data class AppSettings(
     val activeModel: String = "",
     /** Reads (list/read/search) never need confirmation; writes are gated by default. */
     val autoApproveWrites: Boolean = false,
+    /** SAFE commands always run; ASK commands skip their prompt when this is on. */
+    val autoApproveCommands: Boolean = false,
+    /** Hard timeout applied to sandboxed terminal commands. */
+    val commandTimeoutSeconds: Int = 120,
     val temperature: Double = 0.2,
     val maxTokens: Int = 8192,
     /** Hard stop on the tool-use loop so a confused model cannot spin forever. */

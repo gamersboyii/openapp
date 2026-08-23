@@ -1,5 +1,8 @@
 package dev.opencode.mobile.agent
 
+import dev.opencode.mobile.core.build.BuildAction
+import dev.opencode.mobile.core.exec.CommandPolicy
+import dev.opencode.mobile.core.exec.PolicyDecision
 import dev.opencode.mobile.core.git.GitIdentity
 import kotlinx.serialization.json.JsonObject
 
@@ -489,6 +492,116 @@ object PreviewTool : AgentTool {
     override fun summarize(args: JsonObject) = "preview  ${args.str("entry") ?: "index.html"}"
 }
 
+// ---- Terminal / build ------------------------------------------------------
+
+object RunCommandTool : AgentTool {
+    override val name = "run_command"
+    override val description =
+        "Run a shell command inside the active project directory (Android toybox sh). " +
+            "Read-only commands like ls/cat/grep/find/wc run immediately; anything that " +
+            "writes, installs or is unknown asks the user first; destructive commands and " +
+            "access outside the project are blocked outright. There is no npm/node/python/" +
+            "jdk/cargo/go on this device — those fail with 'not found'."
+    override val parameters = schema(
+        "command" to stringProp("Shell command to run, relative to the project root."),
+        "timeout_seconds" to intProp(
+            "Kill the process after this many seconds (1-1800). Default: the user's setting.",
+        ),
+        required = listOf("command"),
+    )
+
+    override fun needsApproval(
+        args: JsonObject,
+        settings: dev.opencode.mobile.core.settings.AppSettings,
+    ): Boolean {
+        val command = args.str("command") ?: return false
+        // SAFE runs silently; BLOCK is refused outright in execute(); only ASK
+        // goes through the approval gate.
+        val decision = CommandPolicy.classify(command).decision
+        return decision == PolicyDecision.ASK && !settings.autoApproveCommands
+    }
+
+    override suspend fun execute(args: JsonObject, context: ToolContext): String {
+        val project = context.requireProject()
+        val command = args.requireStr("command")
+
+        val verdict = CommandPolicy.classify(command)
+        if (verdict.decision == PolicyDecision.BLOCK) {
+            return "ERROR: command blocked by policy — ${verdict.reason}. " +
+                "Do not attempt variations of this; propose a safe alternative instead."
+        }
+
+        val timeoutSeconds = args.int("timeout_seconds", context.settings.commandTimeoutSeconds)
+            .coerceIn(1, 1800)
+
+        return try {
+            val finished = context.terminal.await(
+                context.terminal.start(
+                    command = command,
+                    projectDir = project.dir,
+                    projectName = project.name,
+                    origin = ORIGIN_AGENT,
+                    timeoutSeconds = timeoutSeconds,
+                ),
+            )
+            finished.summarize()
+        } catch (error: IllegalStateException) {
+            "ERROR: ${error.message}"
+        }
+    }
+
+    override fun summarize(args: JsonObject) =
+        "run_command  ${args.str("command").orEmpty().take(60)}"
+}
+
+object BuildProjectTool : AgentTool {
+    override val name = "build_project"
+    override val description =
+        "Detect the project type (Gradle/Android, Maven, Next.js, Vite, React, Node, " +
+            "Python, Rust, Go, static web) and run one action against it. Returns structured " +
+            "results with file:line diagnostics — read them and fix the listed files. " +
+            "Start with action=detect if you don't know the layout."
+    override val parameters = schema(
+        "action" to stringProp(
+            "Which lifecycle step to run.",
+            enum = listOf("detect", "install", "build", "test", "run", "clean"),
+        ),
+        "timeout_seconds" to intProp("Kill the process after this many seconds (1-1800)."),
+        required = listOf("action"),
+    )
+
+    override fun needsApproval(
+        args: JsonObject,
+        settings: dev.opencode.mobile.core.settings.AppSettings,
+    ): Boolean {
+        val action = args.str("action")?.lowercase().orEmpty()
+        return action != "detect" && !settings.autoApproveCommands
+    }
+
+    override suspend fun execute(args: JsonObject, context: ToolContext): String {
+        val project = context.requireProject()
+        val rawAction = args.str("action")?.lowercase().orEmpty()
+        val action = BuildAction.entries.firstOrNull { it.name.lowercase() == rawAction }
+            ?: return "ERROR: unknown action '$rawAction'. Use one of: detect, install, build, test, run, clean."
+
+        val timeoutSeconds = args.int("timeout_seconds", context.settings.commandTimeoutSeconds)
+            .coerceIn(1, 1800)
+
+        return context.builds.perform(
+            terminal = context.terminal,
+            projectDir = project.dir,
+            projectName = project.name,
+            origin = ORIGIN_AGENT,
+            action = action,
+            timeoutSeconds = timeoutSeconds,
+        ).render()
+    }
+
+    override fun summarize(args: JsonObject) = "build_project  ${args.str("action") ?: "?"}"
+}
+
+private const val ORIGIN_AGENT = "agent"
+
 // ---- Registry -------------------------------------------------------------
 
 object ToolRegistry {
@@ -512,6 +625,8 @@ object ToolRegistry {
         GitPushTool,
         GitPullTool,
         PreviewTool,
+        RunCommandTool,
+        BuildProjectTool,
     )
 
     private val byName = tools.associateBy { it.name }
