@@ -67,6 +67,25 @@ tarball/zip endpoint (GitHub codeload, GitLab, Codeberg) and unpacks it. Much
 faster than a full clone on mobile data, but there is no `.git`, so you cannot
 commit or push from a snapshot.
 
+### Checkpoints and change review, not git
+
+Before the agent's first change each turn, the app snapshots the whole project
+into a content-addressed store under `<project>/.opencode/checkpoints` (a
+`blobs/<sha256>` pool + one JSON manifest per checkpoint; identical files share a
+blob). This is **not** git-backed on purpose:
+
+- it must survive the app being killed, and
+- it has to work in a project with no `.git` at all — a template, or a snapshot.
+
+That snapshot powers two things. **Change review:** after a turn touches files, a
+bar in chat offers *Review* (a full diff), *Keep*, or *Undo* — and undo reverts
+the files only, so your chat history is never destroyed to unwind an edit.
+**Checkpoints:** the History screen lists every snapshot for the project, diffs
+one against the live tree or the previous checkpoint, and restores or deletes it.
+You can also save one by hand. Retention is capped (Settings → *Keep last N
+checkpoints*), and the whole feature can be switched off (Settings → *Auto
+checkpoint*).
+
 ---
 
 ## Build
@@ -170,12 +189,14 @@ reading them, not reflexively.
 app/src/main/java/dev/opencode/mobile/
   agent/     tool-calling loop, tool implementations, project templates
   core/fs/   WorkspaceManager — sandboxed file ops, search, zip export
+  core/checkpoint/  content-addressed project snapshots (checkpoints + review)
   core/git/  JGit wrapper, AndroidSystemReader, snapshot downloader
   core/preview/  NanoHTTPD server, live-reload injection
   core/settings/ SettingsStore, theme
-  core/util/ syntax Highlighter
+  core/util/ syntax Highlighter, TextDiff
   llm/       provider registry, three wire protocols, SSE streaming
-  ui/        Compose screens: chat, projects, files, editor, preview, settings
+  ui/        Compose screens: chat, projects, files, editor, preview, settings,
+             terminal, review, checkpoints
 ```
 
 Dependencies are wired by hand through an `AppContainer` service locator exposed

@@ -2,7 +2,7 @@
 
 Android app: an AI coding agent that runs entirely on the phone. Repo
 [gamersboyii/openapp](https://github.com/gamersboyii/openapp), package
-`dev.opencode.mobile`, ~9.2k lines of Kotlin across 34 files.
+`dev.opencode.mobile`, ~11k lines of Kotlin across 38 files.
 
 ## Hard constraints (do not violate)
 
@@ -50,11 +50,12 @@ printf 'protocol=https\nhost=github.com\n\n' | git credential fill
 Manual service locator, no DI framework. `AppContainer` in
 [OpenCodeApp.kt](app/src/main/java/dev/opencode/mobile/OpenCodeApp.kt) builds
 every app-lifetime singleton — `settings`, `workspace`, `git`, `snapshots`,
-`preview`, `commandHistory`, `terminal`, `builds`, `scope`, `agent` — and is
-handed to Compose through `LocalContainer` (a `staticCompositionLocalOf`).
-`bootstrap()` restores the last project and the command history, and keeps the
-agent transcript, remembered path, and preview root in step with
-`workspace.activeProject`.
+`preview`, `commandHistory`, `terminal`, `builds`, `checkpoints`, `scope`,
+`agent` — and is handed to Compose through `LocalContainer` (a
+`staticCompositionLocalOf`). `bootstrap()` restores the last project and the
+command history, keeps the agent transcript, remembered path, and preview root
+in step with `workspace.activeProject`, and rebinds `checkpoints` to the active
+project.
 
 `OpenCodeApp.onCreate` calls `AndroidSystemReader.install(filesDir)` **before**
 `AppContainer` is constructed. JGit otherwise probes `$HOME/.gitconfig` and
@@ -67,11 +68,12 @@ ViewModels — screens hold local `remember` state and read the container.
 
 | Path | Role |
 | --- | --- |
-| `agent/AgentEngine.kt` (~590) | tool-calling loop, transcript, approval gate, session persistence |
+| `agent/AgentEngine.kt` (~700) | tool-calling loop, transcript, approval gate, session persistence, pre-turn checkpoint + turn review |
 | `agent/Tools.kt` (~640) | 21 `AgentTool` objects + `ToolRegistry` |
 | `agent/Tool.kt` (~120) | `AgentTool`/`ToolContext` contracts, JSON arg + schema helpers, dynamic `needsApproval` |
 | `agent/Templates.kt` (538) | 6 zero-build project templates |
 | `core/fs/WorkspaceManager.kt` (317) | sandboxed file ops, search, zip export |
+| `core/checkpoint/CheckpointService.kt` (368) | content-addressed blob snapshots: capture/restore/diff/compare, retention cap |
 | `core/exec/TerminalService.kt` (~360) | sandboxed `sh -c` execution: process registry, timeouts, output caps, history store |
 | `core/exec/CommandPolicy.kt` (~150) | SAFE / ASK / BLOCK command classifier |
 | `core/build/BuildSystem.kt` (~475) | project-type detection + build/test/run/clean with structured diagnostics |
@@ -79,10 +81,11 @@ ViewModels — screens hold local `remember` state and read the container.
 | `core/git/RepoSnapshotService.kt` (118) | zip-archive download alternative to clone |
 | `core/git/AndroidSystemReader.kt` (60) | JGit `SystemReader` replacement |
 | `core/preview/PreviewServer.kt` (232) | NanoHTTPD loopback server + live reload |
-| `core/settings/SettingsStore.kt` (~130) | `AppSettings` as one JSON blob in EncryptedSharedPreferences |
+| `core/settings/SettingsStore.kt` (~130) | `AppSettings` as one JSON blob in EncryptedSharedPreferences (incl. `autoCheckpoint`, `maxCheckpoints`) |
 | `core/util/Highlighter.kt` (177) | regex syntax highlighting |
+| `core/util/TextDiff.kt` (164) | LCS line diff — rows, hunks with context, add/remove stat |
 | `llm/` (5 files) | provider registry, 3 wire protocols, SSE reader |
-| `ui/` (10 files) | Compose screens (incl. terminal) + theme + shared components |
+| `ui/` (13 files) | Compose screens (incl. terminal, review, checkpoints) + theme + shared components |
 
 ### Agent loop
 
@@ -101,6 +104,14 @@ the model stops calling tools or `settings.maxSteps` (default 24) is hit.
   `respondToApproval(Boolean)`.
 - Session is persisted to `<project>/.opencode/session.json`
   (`SESSION_DIR`/`SESSION_FILE` constants).
+- Checkpoint/review: `maybeCheckpoint(tool, settings)` fires once per turn,
+  before the first mutating / `run_command` / `build_project` tool, iff
+  `settings.autoCheckpoint`; it captures with `retain = settings.maxCheckpoints`.
+  `finishTurnReview()` diffs that pre-turn checkpoint against the live tree and,
+  if anything changed, publishes `pendingReview: StateFlow<TurnReview?>`
+  (`checkpointId`, label, fileCount, added, removed). `undoTurn()` restores the
+  checkpoint (files only — the transcript is kept, so a user turn is never
+  silently destroyed); `acceptReview()` just clears the review.
 - Reads (`list_files`, `read_file`, `search_code`, `project_info`, `git_status`,
   `git_diff`, `git_log`, `preview`) are not gated. Mutating: `write_file`,
   `edit_file`, `delete_path`, `create_directory`, `create_project`, `git_clone`,
@@ -115,6 +126,31 @@ Adding a tool: implement `AgentTool` (`name`, `description`, `parameters` via
 `mutating = true` / a custom `needsApproval` if it acts), then register it in
 `ToolRegistry.tools`. `ToolContext.requireProject()` throws a message aimed at
 the model, not the user.
+
+### Checkpoints & change review
+
+[CheckpointService.kt](app/src/main/java/dev/opencode/mobile/core/checkpoint/CheckpointService.kt)
+snapshots the project into a content-addressed store under
+`<project>/.opencode/checkpoints` — a `blobs/<sha256>` pool plus one JSON
+manifest per checkpoint listing `path → sha`. Identical files across checkpoints
+share a blob, so snapshots are cheap. **This is deliberately not git-backed**:
+checkpoints must survive an app restart and work in a project that has no `.git`
+(templates, snapshots). `HIDDEN_DIRS` are skipped, same as the workspace walk.
+
+- `capture(project, label, reason, turn, retain)` writes a checkpoint and prunes
+  to the newest `retain`; returns `null` if the tree is too large. `checkpoints:
+  StateFlow<List<Checkpoint>>` drives the history UI, rebound per project.
+- `restore(project, id)` rewrites the tree to the manifest (deletes files added
+  since); `restoreFile(project, id, path)` reverts one file. `delete` drops a
+  manifest, never touching the working tree.
+- Diffs: `diff(project, id)` compares a checkpoint to the live tree,
+  `compare(project, a, b)` two checkpoints — both return `List<FileChange>`
+  (`path`, `ChangeType`, added, removed). `fileDiff` / `compareFileTexts` return
+  the `(old, new)` text pair a `DiffFileCard` expands lazily.
+
+The review flow (feature: AI change review) is a whole-turn undo layered on this:
+the pre-turn checkpoint is the baseline, so "Undo turn", per-file "Revert", and
+"Keep" all read from the same snapshot. Undo reverts files only — chat stays.
 
 ### Terminal & build
 
@@ -204,9 +240,19 @@ browser via `rememberUrlOpener()`.
 ### UI
 
 `ui/AppRoot.kt` — five bottom-nav tabs (chat, files, preview, projects,
-settings) plus `editor?path={path}` and `terminal` as full-screen pushes that
-hide the nav bar. `Routes.editor(path)` URI-encodes the path. A global
-`LinearProgressIndicator` + status line show while `agent.isRunning`.
+settings) plus `editor?path={path}`, `terminal`, `review`, and `checkpoints` as
+full-screen pushes that hide the nav bar. `Routes.editor(path)` URI-encodes the
+path. A global `LinearProgressIndicator` + status line show while
+`agent.isRunning`.
+
+Review/checkpoints UI (`ui/review/`, `ui/checkpoints/`): `DiffViews.kt` holds the
+shared `TurnReviewBar` (pinned in chat once a turn changed files, gone while the
+agent runs) and `DiffFileCard` (expandable, lazy-loads the text pair, renders
+`TextDiff.hunks`, caps at 600 rows). `ReviewScreen` is the full turn diff with
+Undo/Keep/per-file-revert; `CheckpointsScreen` is the per-project history with
+restore/delete (confirm dialogs), a since-now / vs-previous compare toggle, and a
+manual "Save checkpoint" FAB. Reverts run on `container.scope` (a screen pop must
+not cancel a write) and call `workspace.notifyChanged()` + `preview.signalReload()`.
 
 Editor specifics ([EditorScreen.kt](app/src/main/java/dev/opencode/mobile/ui/files/EditorScreen.kt)):
 
@@ -236,6 +282,9 @@ Editor specifics ([EditorScreen.kt](app/src/main/java/dev/opencode/mobile/ui/fil
   parameter that a caller returns non-locally from needs `crossinline`. For
   anything that calls `emit`, use `suspend` + non-inline.
 - `TextOverflow.MiddleEllipsis` does not exist in Compose 1.7.x.
+- Do not put a plain `enum` in `rememberSaveable` without a custom saver — the
+  default saver only covers `Bundle`-primitive/`Parcelable`/`Serializable` types;
+  a diff-mode toggle uses `remember(key)` instead.
 - `androidx.compose.foundation` is declared explicitly even though material3
   brings it in transitively.
 
