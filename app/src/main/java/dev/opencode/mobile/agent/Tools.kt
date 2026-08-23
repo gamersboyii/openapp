@@ -1,6 +1,7 @@
 package dev.opencode.mobile.agent
 
 import dev.opencode.mobile.core.build.BuildAction
+import dev.opencode.mobile.core.devserver.DevServerManager
 import dev.opencode.mobile.core.exec.CommandPolicy
 import dev.opencode.mobile.core.exec.PolicyDecision
 import dev.opencode.mobile.core.git.GitIdentity
@@ -602,6 +603,83 @@ object BuildProjectTool : AgentTool {
 
 private const val ORIGIN_AGENT = "agent"
 
+// ---- Dev server (feature 5) ------------------------------------------------
+
+/** Shared rendering of dev-server state for the tool results. */
+private fun renderDevServer(state: DevServerManager.State): String = buildString {
+    appendLine("dev server: ${state.status.name.lowercase()} · ${state.kind.display}")
+    state.url?.let { appendLine("url: $it  (open the Preview tab to see it)") }
+    state.error?.let { appendLine("error: $it") }
+    if (state.note.isNotBlank() && state.url == null && state.error == null) {
+        appendLine(state.note)
+    }
+    if (state.status == DevServerManager.Status.STARTING ||
+        state.status == DevServerManager.Status.INSTALLING
+    ) {
+        appendLine("(still ${state.status.name.lowercase()} — call dev_server_status again in a few seconds)")
+    }
+    val tail = state.lines.takeLast(12)
+    if (tail.isNotEmpty()) {
+        appendLine()
+        appendLine("recent output:")
+        tail.forEach { append(if (it.isError) "! " else "  ").appendLine(it.text.take(200)) }
+    }
+}.trimEnd()
+
+object DevServerStartTool : AgentTool {
+    override val name = "dev_server_start"
+    override val description =
+        "Start a Node dev server (Vite / Next.js / React / Node) for the active project and " +
+            "point the Preview tab at it. Detects the project type, installs dependencies " +
+            "(unless install=false), launches the dev command, and sniffs the port it prints. " +
+            "Requires a Node runtime on the device — without one this returns no_runtime and " +
+            "you should use the `preview` tool instead (which works for static, zero-build " +
+            "sites). The server keeps running until dev_server_stop."
+    override val parameters = schema(
+        "install" to boolProp("Run npm install first. Default true; set false when dependencies are already present."),
+    )
+
+    // Starts processes (npm install + a dev server), so gate it like a command.
+    override fun needsApproval(
+        args: JsonObject,
+        settings: dev.opencode.mobile.core.settings.AppSettings,
+    ): Boolean = !settings.autoApproveCommands
+
+    override suspend fun execute(args: JsonObject, context: ToolContext): String {
+        val project = context.requireProject()
+        context.devServer.start(project, install = args.bool("install", true))
+        return renderDevServer(context.devServer.awaitSettled())
+    }
+
+    override fun summarize(args: JsonObject) = "dev_server_start"
+}
+
+object DevServerStopTool : AgentTool {
+    override val name = "dev_server_stop"
+    override val description = "Stop the running Node dev server for the active project."
+    override val parameters = schema()
+
+    override suspend fun execute(args: JsonObject, context: ToolContext): String {
+        context.devServer.stop()
+        return "Dev server stopped."
+    }
+
+    override fun summarize(args: JsonObject) = "dev_server_stop"
+}
+
+object DevServerStatusTool : AgentTool {
+    override val name = "dev_server_status"
+    override val description =
+        "Report the Node dev server's state for the active project: status, detected type, " +
+            "the URL it is serving on, any error, and recent output lines. Read-only."
+    override val parameters = schema()
+
+    override suspend fun execute(args: JsonObject, context: ToolContext): String =
+        renderDevServer(context.devServer.state.value)
+
+    override fun summarize(args: JsonObject) = "dev_server_status"
+}
+
 // ---- Registry -------------------------------------------------------------
 
 object ToolRegistry {
@@ -627,6 +705,9 @@ object ToolRegistry {
         PreviewTool,
         RunCommandTool,
         BuildProjectTool,
+        DevServerStartTool,
+        DevServerStopTool,
+        DevServerStatusTool,
     )
 
     private val byName = tools.associateBy { it.name }

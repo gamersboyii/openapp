@@ -2,16 +2,24 @@
 
 Android app: an AI coding agent that runs entirely on the phone. Repo
 [gamersboyii/openapp](https://github.com/gamersboyii/openapp), package
-`dev.opencode.mobile`, ~11k lines of Kotlin across 38 files.
+`dev.opencode.mobile`, ~11.5k lines of Kotlin across 40 files.
 
 ## Hard constraints (do not violate)
 
 1. **No companion server.** Nothing may depend on a desktop, LAN address, or
    SSH tunnel. The only outbound calls are the user's LLM endpoint and the git
    host.
-2. **No Linux / proot / node / npm.** So project templates must run in a browser
-   with **zero build step** — CDN + import maps only. Never add a template or
-   tool that needs a bundler or a package install.
+2. **Zero-build templates by default; Node runtime is optional + CI-invisible.**
+   Templates must run in a browser with a **zero build step** (CDN + import maps
+   only); never add a template or tool that _requires_ a bundler or a package
+   install to function. The **optional** nodejs-mobile runtime pack
+   (`libnode.so` loaded via JNI, on-device only) lets `dev_server_start` run real
+   `npm install` + pure-JS dev servers — but **not** Vite/webpack/esbuild dev
+   mode (their native addons/binaries cannot exec under the app sandbox), and no
+   proot or Linux userland ever. Stock phones ship no runtime: static stays the
+   baseline and every Node path degrades honestly to `NO_RUNTIME`. The binary is
+   fetched at build time, never committed, and unverifiable in CI. See the
+   "Dev server" section below.
 3. **Cannot compile locally.** No Android SDK, no gradle, no adb on the dev
    machine. Every change is verified only by GitHub Actions. Write defensively:
    filled Material icons only, no Compose API newer than 1.7.x, no experimental
@@ -69,7 +77,7 @@ ViewModels — screens hold local `remember` state and read the container.
 | Path | Role |
 | --- | --- |
 | `agent/AgentEngine.kt` (~700) | tool-calling loop, transcript, approval gate, session persistence, pre-turn checkpoint + turn review |
-| `agent/Tools.kt` (~640) | 21 `AgentTool` objects + `ToolRegistry` |
+| `agent/Tools.kt` (~680) | 24 `AgentTool` objects + `ToolRegistry` |
 | `agent/Tool.kt` (~120) | `AgentTool`/`ToolContext` contracts, JSON arg + schema helpers, dynamic `needsApproval` |
 | `agent/Templates.kt` (538) | 6 zero-build project templates |
 | `core/fs/WorkspaceManager.kt` (317) | sandboxed file ops, search, zip export |
@@ -77,6 +85,8 @@ ViewModels — screens hold local `remember` state and read the container.
 | `core/exec/TerminalService.kt` (~360) | sandboxed `sh -c` execution: process registry, timeouts, output caps, history store |
 | `core/exec/CommandPolicy.kt` (~150) | SAFE / ASK / BLOCK command classifier |
 | `core/build/BuildSystem.kt` (~475) | project-type detection + build/test/run/clean with structured diagnostics |
+| `core/devserver/DevServerManager.kt` (~275) | hosts one long-running Node dev server: detect → install → spawn → port sniff → URL → crash watch |
+| `core/devserver/NodeRuntime.kt` (~55) | probes whether Node can exec on-device + the PATH env to reach the optional runtime pack |
 | `core/git/GitService.kt` (239) | JGit clone/status/commit/log/diff/branch/pull/push |
 | `core/git/RepoSnapshotService.kt` (118) | zip-archive download alternative to clone |
 | `core/git/AndroidSystemReader.kt` (60) | JGit `SystemReader` replacement |
@@ -113,13 +123,17 @@ the model stops calling tools or `settings.maxSteps` (default 24) is hit.
   checkpoint (files only — the transcript is kept, so a user turn is never
   silently destroyed); `acceptReview()` just clears the review.
 - Reads (`list_files`, `read_file`, `search_code`, `project_info`, `git_status`,
-  `git_diff`, `git_log`, `preview`) are not gated. Mutating: `write_file`,
-  `edit_file`, `delete_path`, `create_directory`, `create_project`, `git_clone`,
-  `fetch_repo_snapshot`, `git_init`, `git_commit`, `git_push`, `git_pull`.
+  `git_diff`, `git_log`, `preview`, `dev_server_status`) are not gated. Mutating:
+  `write_file`, `edit_file`, `delete_path`, `create_directory`, `create_project`,
+  `git_clone`, `fetch_repo_snapshot`, `git_init`, `git_commit`, `git_push`,
+  `git_pull`.
 - `run_command` executes through the sandboxed terminal; BLOCK-classified
   commands return an ERROR to the model without ever prompting. SAFE ones run
   silently. ASK prompts unless auto-approve commands is on.
 - `build_project` gates every action except `detect`.
+- `dev_server_start` / `dev_server_stop` spawn a real process (`npm install` +
+  the dev command), so both gate on `!settings.autoApproveCommands` like a
+  command; `dev_server_status` is a read.
 
 Adding a tool: implement `AgentTool` (`name`, `description`, `parameters` via
 `schema(...)`/`stringProp`/`boolProp`/`intProp`, `execute`, `summarize`, and
@@ -237,6 +251,53 @@ reload client and user pages) but `allowFileAccess = false` and
 `allowContentAccess = false`; non-loopback navigation is handed to the system
 browser via `rememberUrlOpener()`.
 
+### Dev server (feature 5)
+
+Real web-dev support for Node projects, layered on the one sandboxed terminal —
+no second execution mechanism. Two services under `core/devserver/`:
+
+[NodeRuntime.kt](app/src/main/java/dev/opencode/mobile/core/devserver/NodeRuntime.kt)
+answers one question: *can Node exec on this device, and with what env?* It
+probes empirically (`node --version` through the terminal), caches the result,
+and returns the `PATH` prefix that reaches an installed runtime pack
+(`filesDir/runtime/bin`). On a stock phone there is no pack, so it reports
+unavailable — it never pretends. The pack itself (nodejs-mobile `libnode.so`) is
+**not** wired yet and is an on-device-only, CI-invisible step (see hard
+constraint 2).
+
+[DevServerManager.kt](app/src/main/java/dev/opencode/mobile/core/devserver/DevServerManager.kt)
+hosts exactly one long-running dev server for the active project. `State`
+(`StateFlow`) carries a `Status` — `STOPPED` / `UNSUPPORTED` (non-Node kind) /
+`NO_RUNTIME` (no pack) / `INSTALLING` / `STARTING` / `RUNNING` / `CRASHED` — plus
+`kind`, `port`, `url`, `error`, and a bounded (`MAX_LINES` = 300) log tail.
+
+- `bind(project)` stops any prior server and re-detects the kind (never starts).
+- `start(project, install)` holds a `lifecycle` `Mutex` through the whole
+  install-then-spawn so concurrent starts collapse (`runId != null` → no-op).
+  It gates on `RUNNABLE` = {`NODE_VITE`, `NODE_REACT`, `NODE_NEXT`,
+  `NODE_GENERIC`}, probes `NodeRuntime`, optionally runs `npm install`
+  (`INSTALL_TIMEOUT` = 900 s), then spawns the dev command via
+  `terminal.start(timeoutSeconds = 0, env = node.env, onLine = ::consume)` —
+  no timeout because it is long-running. Dev command: `npm start` for
+  `NODE_REACT`, else `npm run dev`.
+- `consume(line)` sniffs the port from each output line (`PORT_PATTERNS`,
+  specific-first) under `logLock`; the first hit flips `Status.RUNNING` and sets
+  `url = http://localhost:<port>/`. `watch(id)` awaits process death and maps it
+  to `STOPPED` (user kill) vs `CRASHED`.
+- `awaitSettled(timeoutMs)` suspends past the transient INSTALLING/STARTING
+  states so a tool reports a settled result, not the momentary STARTING.
+
+Concurrency: `terminal.await` returns strictly after the drain threads join
+(after the last `onLine`), so `consume` and `watch` never overlap; `logLock`
+guards only the two drain threads; `runId` is `@Volatile`.
+
+Agent tools (`dev_server_start` / `dev_server_stop` / `dev_server_status`) and
+preview integration: `PreviewScreen` prefers a live dev-server URL over the
+static loopback server (`effectiveUrl = devUrl ?: state.url`), shows the kind and
+status in the subtitle, and offers a "Dev server" / "Stop dev" toggle for
+runnable kinds. When there is no runtime the agent is told (system prompt) to
+fall back to the `preview` tool, which still serves static / zero-build sites.
+
 ### UI
 
 `ui/AppRoot.kt` — five bottom-nav tabs (chat, files, preview, projects,
@@ -303,9 +364,13 @@ Editor specifics ([EditorScreen.kt](app/src/main/java/dev/opencode/mobile/ui/fil
 
 ## Known gaps
 
-- No bundler-based dev servers (constraint 2). Terminal commands are limited to
-  the phone's toybox shell — npm/python/jdk/cargo/go are absent, so ecosystem
-  install/build recipes fail honestly with "not found".
+- Node dev servers need the optional runtime pack, which is **not wired yet**:
+  `NodeRuntime` reports unavailable on every stock phone, so `dev_server_start`
+  returns `NO_RUNTIME` until `libnode.so` is bundled (on-device-only step). Even
+  with it, only pure-JS servers run — Vite/webpack/esbuild dev mode cannot exec
+  (constraint 2). Absent the pack, terminal commands are limited to the phone's
+  toybox shell (no npm/python/jdk/cargo/go), so ecosystem recipes fail honestly
+  with "not found".
 - Clone/push HTTPS only; no SSH keys.
 - Repo snapshots have no `.git`, so they cannot be committed or pushed.
 - Highlighter disables itself past `MAX_CHARS` (120_000).

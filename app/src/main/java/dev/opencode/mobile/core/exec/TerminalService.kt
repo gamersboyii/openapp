@@ -165,6 +165,12 @@ class TerminalService(
     /**
      * Starts [command] inside [projectDir]. Throws [IllegalStateException] when
      * too many processes are already running; returns the run id otherwise.
+     *
+     * [timeoutSeconds] <= 0 means no timeout — the process runs until it exits or
+     * is stopped. Use that only for long-running servers you control the lifetime
+     * of. [onLine] (when set) is invoked on the IO dispatcher for every captured
+     * line as it arrives, so a caller can watch live output (e.g. sniff a dev
+     * server's port) without waiting for the process to exit.
      */
     fun start(
         command: String,
@@ -172,6 +178,8 @@ class TerminalService(
         projectName: String,
         origin: String,
         timeoutSeconds: Int,
+        env: Map<String, String> = emptyMap(),
+        onLine: ((line: String, isError: Boolean) -> Unit)? = null,
     ): String {
         check(activeRuns.size < MAX_CONCURRENT) {
             "Too many processes are already running ($MAX_CONCURRENT max). Stop one first."
@@ -188,7 +196,7 @@ class TerminalService(
             ),
         )
 
-        scope.launch { execute(id, projectDir, timeoutSeconds) }
+        scope.launch { execute(id, projectDir, timeoutSeconds, env, onLine) }
         return id
     }
 
@@ -215,7 +223,13 @@ class TerminalService(
         processes.keys.toList().forEach { stop(it) }
     }
 
-    private suspend fun execute(id: String, projectDir: File, timeoutSeconds: Int) {
+    private suspend fun execute(
+        id: String,
+        projectDir: File,
+        timeoutSeconds: Int,
+        env: Map<String, String>,
+        onLine: ((line: String, isError: Boolean) -> Unit)?,
+    ) {
         var patch = _runs.value.first { it.id == id }
 
         suspend fun update(transform: (CommandRun) -> CommandRun) {
@@ -225,12 +239,15 @@ class TerminalService(
 
         val builder = ProcessBuilder("sh", "-c", patch.command).directory(projectDir)
         // A minimal, predictable environment: nothing from the app leaks in,
-        // and PATH resolves against the system toybox binaries only.
+        // and PATH resolves against the system toybox binaries only. Callers may
+        // layer extra variables on top (e.g. a PATH prefix for a bundled runtime),
+        // but never remove the safe defaults.
         builder.environment().apply {
             put("PATH", ANDROID_PATH)
             put("HOME", projectDir.absolutePath)
             put("TMPDIR", tmpDir.absolutePath)
             put("LANG", "C.UTF-8")
+            env.forEach { (key, value) -> put(key, value) }
         }
 
         val process = try {
@@ -257,14 +274,23 @@ class TerminalService(
         // Readers only fill buffers/flags; the worker below is the single
         // writer to the CommandRun, so no state races on it.
         val outJob = scope.launch {
-            if (drain(process.inputStream.bufferedReader(), outBuffer)) outTruncated.set(true)
+            if (drain(process.inputStream.bufferedReader(), outBuffer, isError = false, onLine)) {
+                outTruncated.set(true)
+            }
         }
         val errJob = scope.launch {
-            if (drain(process.errorStream.bufferedReader(), errBuffer)) errTruncated.set(true)
+            if (drain(process.errorStream.bufferedReader(), errBuffer, isError = true, onLine)) {
+                errTruncated.set(true)
+            }
         }
 
-        val exited = withTimeoutOrNull(timeoutSeconds * 1000L) { process.waitFor() }
-        val timedOut = exited == null
+        // timeoutSeconds <= 0 => run until the process exits or is stopped.
+        val exited = if (timeoutSeconds > 0) {
+            withTimeoutOrNull(timeoutSeconds * 1000L) { process.waitFor() }
+        } else {
+            process.waitFor()
+        }
+        val timedOut = timeoutSeconds > 0 && exited == null
         if (timedOut) {
             runCatching { process.destroy() }
             delay(FORCE_KILL_GRACE_MS)
@@ -314,11 +340,17 @@ class TerminalService(
      * blocks on a full pipe and the timeout stays meaningful. Returns whether
      * anything was discarded.
      */
-    private fun drain(reader: BufferedReader, buffer: StringBuilder): Boolean {
+    private fun drain(
+        reader: BufferedReader,
+        buffer: StringBuilder,
+        isError: Boolean,
+        onLine: ((line: String, isError: Boolean) -> Unit)?,
+    ): Boolean {
         var truncated = false
         try {
             while (true) {
                 val line = reader.readLine() ?: break
+                onLine?.let { runCatching { it(line, isError) } }
                 synchronized(buffer) {
                     if (buffer.length + line.length + 1 > MAX_CAPTURE_CHARS) {
                         truncated = true

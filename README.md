@@ -18,7 +18,7 @@ Everything the agent needs is in the APK: the file tools, the git client, the
 HTTP preview server, the LLM transport. Nothing points at a LAN address. Kill
 Wi-Fi and the only thing that breaks is the model call itself.
 
-### No Linux, no proot, no npm
+### No Linux, no proot
 A proot Alpine/Debian rootfs is the usual way to get `node` on Android, and it
 costs 200–400 MB plus a fragile bootstrap. This app skips it entirely. The
 consequence is a hard rule that shapes the whole product:
@@ -36,9 +36,26 @@ So instead of `npm install` + a bundler, templates use:
 | Vue 3 app | Vue 3 global build |
 | Landing page | static marketing page (hero / features / pricing / FAQ / footer) |
 
-This is a real limitation, stated plainly: you cannot run a Vite/Next/Webpack
-project's dev server here. You *can* clone one, read it, edit it, commit it, and
-push it — you just can't `npm run dev` on the phone.
+That zero-build rule still governs **templates**. A cloned Vite/Next/Webpack
+project is a different story: an **optional** on-device Node runtime (next
+section) can `npm install` and start a *pure-JS* dev server — but never the
+bundler's own native dev mode. Either way you can always clone such a project,
+read it, edit it, commit it, and push it.
+
+### Node dev servers (optional runtime)
+For Node web projects (Vite / Next.js / React / plain Node), the agent can stand
+up a live dev server with `dev_server_start`: detect the project type, run
+`npm install`, launch the dev command, sniff the port it prints, and point the
+Preview tab at the running URL. `dev_server_status` reports state and recent
+output; `dev_server_stop` tears it down.
+
+This needs a Node runtime on the device, which is **optional and not bundled by
+default**. Without it, `dev_server_start` returns `NO_RUNTIME` and you fall back
+to the loopback preview, which still serves static / zero-build sites. Even with
+the runtime, only *pure-JS* servers run — Vite/webpack/esbuild dev mode relies on
+native binaries that cannot exec under the Android app sandbox. It runs through
+the same sandboxed terminal as every other command; there is no second execution
+path and still no proot.
 
 ### Preview over loopback HTTP, not `file://`
 `file://` pages cannot use ES modules, `fetch`, or import maps — Chrome's origin
@@ -146,7 +163,8 @@ OpenAI `/chat/completions`, Anthropic Messages, and Gemini
 `list_files` · `read_file` · `write_file` · `edit_file` · `delete_path` ·
 `create_directory` · `search_code` · `create_project` · `project_info` ·
 `git_clone` · `fetch_repo_snapshot` · `git_status` · `git_init` · `git_commit` ·
-`git_diff` · `git_log` · `git_push` · `git_pull` · `preview`
+`git_diff` · `git_log` · `git_push` · `git_pull` · `preview` ·
+`dev_server_start` · `dev_server_stop` · `dev_server_status`
 
 Every call is gated on an in-chat approve/deny prompt, and the loop has a
 `maxSteps` backstop so a confused model cannot spin forever. Session history is
@@ -190,6 +208,8 @@ app/src/main/java/dev/opencode/mobile/
   agent/     tool-calling loop, tool implementations, project templates
   core/fs/   WorkspaceManager — sandboxed file ops, search, zip export
   core/checkpoint/  content-addressed project snapshots (checkpoints + review)
+  core/build/  project-type detection + build/test/run/clean recipes
+  core/devserver/  Node dev-server host + on-device runtime probe
   core/git/  JGit wrapper, AndroidSystemReader, snapshot downloader
   core/preview/  NanoHTTPD server, live-reload injection
   core/settings/ SettingsStore, theme
@@ -205,7 +225,9 @@ that can only be verified in CI.
 
 ## Known limits
 
-- No `npm`/`node`, so no bundler-based dev servers (see above).
+- Node dev servers need an optional runtime that is **not bundled yet**; until it
+  is, `dev_server_start` reports `NO_RUNTIME`. Even then, only pure-JS servers run
+  — no Vite/webpack/esbuild dev mode (see above).
 - Clone and push are HTTPS-only; no SSH keys.
 - Repo snapshots have no `.git` and cannot be committed or pushed.
 - Text files only in the editor, with a size cap; the highlighter turns itself

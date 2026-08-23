@@ -3,6 +3,7 @@ package dev.opencode.mobile.agent
 import dev.opencode.mobile.core.build.BuildSystem
 import dev.opencode.mobile.core.checkpoint.Checkpoint
 import dev.opencode.mobile.core.checkpoint.CheckpointService
+import dev.opencode.mobile.core.devserver.DevServerManager
 import dev.opencode.mobile.core.exec.CommandPolicy
 import dev.opencode.mobile.core.exec.CommandHistoryStore
 import dev.opencode.mobile.core.exec.TerminalService
@@ -100,6 +101,7 @@ class AgentEngine(
     private val preview: PreviewServer,
     private val terminal: TerminalService,
     private val builds: BuildSystem,
+    private val devServer: DevServerManager,
     private val commandHistory: CommandHistoryStore,
     private val settingsStore: SettingsStore,
     private val scope: CoroutineScope,
@@ -443,6 +445,7 @@ class AgentEngine(
             preview = preview,
             terminal = terminal,
             builds = builds,
+            devServer = devServer,
             history = commandHistory,
             settings = settings,
             project = workspace.activeProject.value,
@@ -569,9 +572,11 @@ class AgentEngine(
                 - Commands run through `run_command` on the phone's Android shell
                   (toybox) inside a sandbox: working directory pinned to the project,
                   fixed PATH, hard timeout, output caps. Basic inspection works
-                  (ls, cat, grep, find, wc). There is NO Node.js/npm, NO Python,
-                  NO JDK/Gradle, NO cargo/go installed — ecosystem installs and
-                  builds fail with 'not found'. Never pretend a build succeeded.
+                  (ls, cat, grep, find, wc). By default there is NO Node.js/npm, NO
+                  Python, NO JDK/Gradle, NO cargo/go — ecosystem installs and builds
+                  fail with 'not found'. Never pretend a build succeeded. (An optional
+                  Node runtime pack, if the user installed one, enables real dev
+                  servers — see dev_server_start below.)
                 - Every command is classified before it runs: read-only commands run
                   immediately; anything that writes or installs asks the user;
                   destructive commands and access outside the project are blocked.
@@ -580,6 +585,12 @@ class AgentEngine(
                   build/test/run/clean, returning structured file:line diagnostics.
                   Read them, fix the named files, then build again. For static web
                   projects there is nothing to compile — use `preview` instead.
+                - For Node web apps (Vite/Next.js/React/Node), `dev_server_start` runs
+                  the actual dev server IF a Node runtime is present: it detects the
+                  project, installs dependencies, starts the dev command, sniffs the
+                  port, and points the Preview tab at it. If it returns no_runtime,
+                  say so and fall back to `preview` for static, zero-build sites.
+                  Check state with dev_server_status; shut it down with dev_server_stop.
                 - Web projects must work by opening an HTML file directly. Get dependencies
                   from a CDN (esm.sh, unpkg, jsdelivr) using an import map, or use a global
                   script build. For React, JSX is compiled in-page by @babel/standalone.

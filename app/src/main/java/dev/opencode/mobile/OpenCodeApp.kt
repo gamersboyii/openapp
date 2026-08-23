@@ -5,6 +5,8 @@ import androidx.compose.runtime.staticCompositionLocalOf
 import dev.opencode.mobile.agent.AgentEngine
 import dev.opencode.mobile.core.build.BuildSystem
 import dev.opencode.mobile.core.checkpoint.CheckpointService
+import dev.opencode.mobile.core.devserver.DevServerManager
+import dev.opencode.mobile.core.devserver.NodeRuntime
 import dev.opencode.mobile.core.exec.CommandHistoryStore
 import dev.opencode.mobile.core.exec.TerminalService
 import dev.opencode.mobile.core.fs.WorkspaceManager
@@ -37,6 +39,9 @@ class AppContainer(application: Application) {
 
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
+    val nodeRuntime = NodeRuntime(application, terminal)
+    val devServer = DevServerManager(terminal, builds, nodeRuntime, scope)
+
     val agent = AgentEngine(
         workspace = workspace,
         git = git,
@@ -45,6 +50,7 @@ class AppContainer(application: Application) {
         preview = preview,
         terminal = terminal,
         builds = builds,
+        devServer = devServer,
         commandHistory = commandHistory,
         settingsStore = settings,
         scope = scope,
@@ -62,6 +68,7 @@ class AppContainer(application: Application) {
             workspace.activeProject.collectLatest { project ->
                 agent.bindProject(project)
                 checkpoints.bind(project)
+                devServer.bind(project)
                 settings.update { it.copy(lastProjectPath = project?.path) }
                 if (project == null) {
                     preview.stop()

@@ -60,6 +60,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.opencode.mobile.LocalContainer
+import dev.opencode.mobile.core.devserver.DevServerManager
 import dev.opencode.mobile.ui.components.EmptyState
 import dev.opencode.mobile.ui.components.rememberUrlOpener
 import dev.opencode.mobile.ui.theme.MonoStyle
@@ -78,6 +79,13 @@ fun PreviewScreen() {
 
     val project by container.workspace.activeProject.collectAsStateWithLifecycle()
     val state by preview.state.collectAsStateWithLifecycle()
+
+    // A live Node dev server takes precedence over the static loopback server: the
+    // WebView points at whichever is actually serving, dev server first.
+    val devState by container.devServer.state.collectAsStateWithLifecycle()
+    val devUrl = devState.url?.takeIf { devState.isLive }
+    val effectiveUrl = devUrl ?: state.url
+    val serving = devUrl != null || state.running
 
     var web by remember { mutableStateOf<WebView?>(null) }
     var entry by remember { mutableStateOf(state.entry) }
@@ -108,7 +116,7 @@ fun PreviewScreen() {
 
     LaunchedEffect(state.entry) { entry = state.entry }
 
-    val url = state.url
+    val url = effectiveUrl
     LaunchedEffect(url, web) {
         val view = web ?: return@LaunchedEffect
         if (url != null) view.loadUrl(url)
@@ -121,10 +129,21 @@ fun PreviewScreen() {
             title = {
                 Column {
                     Text("Preview", style = MaterialTheme.typography.titleMedium)
+                    val subtitle = when {
+                        devUrl != null -> "$devUrl · dev server (${devState.kind.display})"
+                        devState.isBusy -> "${devState.status.name.lowercase()}…"
+                        state.url != null -> state.url!!
+                        devState.error != null -> devState.error!!
+                        state.error != null -> state.error!!
+                        else -> "Server stopped"
+                    }
+                    val subtitleIsError = effectiveUrl == null &&
+                        !devState.isBusy &&
+                        (devState.error != null || state.error != null)
                     Text(
-                        text = url ?: state.error ?: "Server stopped",
+                        text = subtitle,
                         style = MaterialTheme.typography.labelSmall,
-                        color = if (state.error != null) {
+                        color = if (subtitleIsError) {
                             MaterialTheme.colorScheme.error
                         } else {
                             MaterialTheme.colorScheme.onSurfaceVariant
@@ -146,14 +165,17 @@ fun PreviewScreen() {
                         },
                     )
                 }
-                IconButton(onClick = { web?.reload() }, enabled = state.running) {
+                IconButton(onClick = { web?.reload() }, enabled = serving) {
                     Icon(Icons.Filled.Refresh, contentDescription = "Reload")
                 }
                 IconButton(onClick = { url?.let(openUrl) }, enabled = url != null) {
                     Icon(Icons.Filled.OpenInBrowser, contentDescription = "Open in browser")
                 }
-                if (state.running) {
-                    IconButton(onClick = { preview.stop() }) {
+                if (serving) {
+                    IconButton(onClick = {
+                        // Stop whichever server is actually serving this view.
+                        if (devUrl != null) container.devServer.stop() else preview.stop()
+                    }) {
                         Icon(Icons.Filled.Stop, contentDescription = "Stop server")
                     }
                 } else {
@@ -189,6 +211,20 @@ fun PreviewScreen() {
             ) {
                 Text("Go")
             }
+            if (DevServerManager.isRunnableKind(devState.kind)) {
+                val devActive = devState.isLive || devState.isBusy
+                TextButton(
+                    onClick = {
+                        val p = project
+                        if (p != null) {
+                            if (devActive) container.devServer.stop()
+                            else scope.launch { container.devServer.start(p) }
+                        }
+                    },
+                ) {
+                    Text(if (devActive) "Stop dev" else "Dev server")
+                }
+            }
         }
 
         if (progress in 1..99) {
@@ -200,7 +236,8 @@ fun PreviewScreen() {
             Spacer(Modifier.height(2.dp))
         }
 
-        state.error?.let { message ->
+        val shownError = if (effectiveUrl != null) null else devState.error ?: state.error
+        shownError?.let { message ->
             Surface(
                 color = MaterialTheme.colorScheme.errorContainer,
                 shape = RoundedCornerShape(10.dp),
@@ -222,11 +259,17 @@ fun PreviewScreen() {
                 message = "Open a project first, then this tab serves it over loopback HTTP.",
             )
 
-            !state.running -> EmptyState(
+            !serving -> EmptyState(
                 icon = Icons.Filled.Visibility,
                 title = "Server stopped",
                 message = "Start it to preview ${project?.name}. Pages are served from " +
-                    "127.0.0.1 so module imports and fetch work — unlike file:// URLs.",
+                    "127.0.0.1 so module imports and fetch work — unlike file:// URLs." +
+                    if (DevServerManager.isRunnableKind(devState.kind)) {
+                        " This is a ${devState.kind.display} project — use \"Dev server\" above to run it " +
+                            "(needs a Node runtime on the device)."
+                    } else {
+                        ""
+                    },
             ) {
                 Button(onClick = start) { Text("Start preview") }
             }

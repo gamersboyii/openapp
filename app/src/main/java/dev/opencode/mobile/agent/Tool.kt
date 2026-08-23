@@ -1,6 +1,7 @@
 package dev.opencode.mobile.agent
 
 import dev.opencode.mobile.core.build.BuildSystem
+import dev.opencode.mobile.core.devserver.DevServerManager
 import dev.opencode.mobile.core.exec.CommandHistoryStore
 import dev.opencode.mobile.core.fs.Project
 import dev.opencode.mobile.core.fs.WorkspaceManager
@@ -27,6 +28,7 @@ class ToolContext(
     val preview: PreviewServer,
     val terminal: TerminalService,
     val builds: BuildSystem,
+    val devServer: DevServerManager,
     val history: CommandHistoryStore,
     val settings: AppSettings,
     /** Active project. Null until one is created or opened. */
