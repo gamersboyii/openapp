@@ -1,8 +1,13 @@
 package dev.opencode.mobile.ui.chat
 
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.provider.OpenableColumns
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -20,52 +25,47 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.ExpandLess
-import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material.icons.filled.ExpandMore
-import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Insights
-import androidx.compose.material.icons.filled.Send
+import androidx.compose.material.icons.filled.NotificationsActive
+import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Terminal
-import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilledIconButton
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.SegmentedButton
-import androidx.compose.material3.SegmentedButtonDefaults
-import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextField
 import androidx.compose.material3.TextFieldDefaults
-import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -74,17 +74,16 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
-import androidx.compose.animation.animateContentSize
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.core.content.FileProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.opencode.mobile.LocalContainer
 import dev.opencode.mobile.agent.ChatEntry
@@ -93,9 +92,12 @@ import dev.opencode.mobile.agent.ToolRun
 import dev.opencode.mobile.agent.ToolStatus
 import dev.opencode.mobile.ui.components.CodeBlock
 import dev.opencode.mobile.ui.components.MarkdownText
+import dev.opencode.mobile.ui.components.SparkleAvatar
+import dev.opencode.mobile.ui.components.UserAvatar
 import dev.opencode.mobile.ui.review.TurnReviewBar
 import dev.opencode.mobile.ui.theme.MonoStyle
 import dev.opencode.mobile.ui.theme.StatusWarning
+import java.io.File
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -109,6 +111,13 @@ private val Suggestions = listOf(
 
 private val LenientJson = Json { ignoreUnknownKeys = true; isLenient = true }
 
+/**
+ * The conversation canvas, laid out exactly like the official ChatGPT app:
+ * open messages on a flat background (no bubbles), the user's text right
+ * aligned in white with a circular initial avatar, assistant text left
+ * aligned in muted off-white behind a sparkle mark, and a single floating
+ * capsule composer at the bottom.
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ChatScreen(
@@ -132,10 +141,46 @@ fun ChatScreen(
 
     var draft by rememberSaveable { mutableStateOf("") }
     val listState = rememberLazyListState()
+    val ctx = LocalContext.current
 
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { }
+
+    // ---- attachments --------------------------------------------------------
+
+    val filePicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument(),
+    ) { uri ->
+        val rel = uri?.let { importToUploads(ctx, it, project?.path) }
+        if (rel != null) draft = appendMention(draft, rel)
+    }
+
+    var pendingCapture by remember { mutableStateOf<File?>(null) }
+    val cameraLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.TakePicture(),
+    ) { ok ->
+        val src = pendingCapture
+        pendingCapture = null
+        val projectPath = project?.path
+        if (ok && src != null && projectPath != null) {
+            runCatching {
+                val uploads = File(projectPath, "uploads").apply { mkdirs() }
+                val dest = File(uploads, "capture-${System.currentTimeMillis()}.jpg")
+                src.copyTo(dest, overwrite = true)
+                draft = appendMention(draft, "uploads/${dest.name}")
+            }
+        }
+    }
+
+    val speechLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult(),
+    ) { result ->
+        val text = result.data
+            ?.getStringArrayListExtra(android.speech.RecognizerIntent.EXTRA_RESULTS)
+            ?.firstOrNull()
+        if (!text.isNullOrBlank()) draft = if (draft.isBlank()) text else "$draft $text"
+    }
 
     // Follow the tail only while the user is already there, so scrolling back
     // through history is not yanked forward by each streamed token.
@@ -147,43 +192,6 @@ fun ChatScreen(
     }
 
     Column(modifier = Modifier.fillMaxSize()) {
-        TopAppBar(
-            title = {
-                Column(modifier = Modifier.clickable(onClick = onOpenProjects)) {
-                    Text(
-                        text = project?.name ?: "No project",
-                        style = MaterialTheme.typography.titleMedium,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    Text(
-                        text = settings.activeModel.ifBlank { "No model — open Settings" },
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
-            },
-            actions = {
-                IconButton(onClick = onOpenSkills) {
-                    Icon(Icons.Filled.AutoAwesome, contentDescription = "Skills")
-                }
-                IconButton(onClick = onOpenCheckpoints) {
-                    Icon(Icons.Filled.History, contentDescription = "Checkpoints")
-                }
-                IconButton(onClick = onOpenPreview) {
-                    Icon(Icons.Filled.Visibility, contentDescription = "Preview")
-                }
-                IconButton(onClick = { agent.clear() }, enabled = entries.isNotEmpty()) {
-                    Icon(Icons.Filled.DeleteSweep, contentDescription = "Clear chat")
-                }
-            },
-            colors = TopAppBarDefaults.topAppBarColors(
-                containerColor = MaterialTheme.colorScheme.background,
-            ),
-        )
-
         Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
             if (entries.isEmpty()) {
                 StarterPanel(
@@ -195,11 +203,16 @@ fun ChatScreen(
                 LazyColumn(
                     state = listState,
                     modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 12.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 16.dp),
+                    verticalArrangement = Arrangement.spacedBy(22.dp),
                 ) {
                     items(items = entries, key = { it.id }) { entry ->
-                        EntryRow(entry = entry, onOpenFile = onOpenFile, modifier = Modifier.animateItem())
+                        EntryRow(
+                            entry = entry,
+                            initial = userInitial(settings.githubLogin),
+                            onOpenFile = onOpenFile,
+                            modifier = Modifier.animateItem(),
+                        )
                     }
                 }
             }
@@ -216,33 +229,56 @@ fun ChatScreen(
         }
 
         Composer(
-            value = draft,
-            onValueChange = { draft = it },
-            isRunning = isRunning,
-            chatOnly = settings.chatOnly,
-            onToggleChatOnly = { value -> container.settings.update { it.copy(chatOnly = value) } },
-            onSend = {
-                val text = draft.trim()
-                if (text.isNotEmpty()) {
-                    agent.send(text)
-                    draft = ""
-                }
-            },
-            onStop = { agent.cancel() },
-            onRunInBackground = { ctx ->
-                // API 33+: ask once for POST_NOTIFICATIONS; the foreground
-                // service starts regardless — notifications are just hidden
-                // while the permission is missing.
-                val granted = androidx.core.content.ContextCompat.checkSelfPermission(
-                    ctx,
-                    android.Manifest.permission.POST_NOTIFICATIONS,
-                ) == android.content.pm.PackageManager.PERMISSION_GRANTED
-                if (!granted && android.os.Build.VERSION.SDK_INT >= 33) {
-                    permissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
-                }
-                dev.opencode.mobile.bg.AgentForegroundService.start(ctx)
-            },
-        )
+        value = draft,
+        onValueChange = { draft = it },
+        isRunning = isRunning,
+        chatOnly = settings.chatOnly,
+        hasProject = project != null,
+        onPickFile = {
+            runCatching {
+                filePicker.launch(arrayOf("*/*"))
+            }
+        },
+        onTakePhoto = {
+            val shot = File(ctx.cacheDir, "exports/capture-${System.currentTimeMillis()}.jpg")
+                .apply { parentFile?.mkdirs() }
+            pendingCapture = shot
+            runCatching {
+                val uri = FileProvider.getUriForFile(ctx, "${ctx.packageName}.fileprovider", shot)
+                cameraLauncher.launch(uri)
+            }
+        },
+        onVoice = {
+            val intent = Intent(android.speech.RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                putExtra(
+                    android.speech.RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+                    android.speech.RecognizerIntent.LANGUAGE_MODEL_FREE_FORM,
+                )
+            }
+            runCatching { speechLauncher.launch(intent) }
+        },
+        onSend = {
+            val text = draft.trim()
+            if (text.isNotEmpty()) {
+                agent.send(text)
+                draft = ""
+            }
+        },
+        onStop = { agent.cancel() },
+        onRunInBackground = { context ->
+            // API 33+: ask once for POST_NOTIFICATIONS; the foreground
+            // service starts regardless — notifications are just hidden
+            // while the permission is missing.
+            val granted = androidx.core.content.ContextCompat.checkSelfPermission(
+                context,
+                android.Manifest.permission.POST_NOTIFICATIONS,
+            ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+            if (!granted && android.os.Build.VERSION.SDK_INT >= 33) {
+                permissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+            }
+            dev.opencode.mobile.bg.AgentForegroundService.start(context)
+        },
+    )
     }
 
     val request = approval
@@ -270,10 +306,15 @@ fun ChatScreen(
 // ---- entries --------------------------------------------------------------
 
 @Composable
-private fun EntryRow(entry: ChatEntry, onOpenFile: (String) -> Unit, modifier: Modifier = Modifier) {
+private fun EntryRow(
+    entry: ChatEntry,
+    initial: String,
+    onOpenFile: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
     Column(modifier = modifier) {
         when (entry.kind) {
-            EntryKind.USER -> UserBubble(entry.text)
+            EntryKind.USER -> UserRow(entry.text, initial)
             EntryKind.ASSISTANT -> AssistantBlock(entry)
             EntryKind.TOOL -> entry.toolRun?.let { ToolCard(it, onOpenFile) }
             EntryKind.ERROR -> BannerRow(
@@ -293,40 +334,53 @@ private fun EntryRow(entry: ChatEntry, onOpenFile: (String) -> Unit, modifier: M
     }
 }
 
+/** User message: right-aligned white text with the circular avatar beside it. */
 @Composable
-private fun UserBubble(text: String) {
-    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-        Surface(
-            color = MaterialTheme.colorScheme.primaryContainer,
-            contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
-            shape = RoundedCornerShape(14.dp, 14.dp, 4.dp, 14.dp),
-            modifier = Modifier.fillMaxWidth(0.88f),
-        ) {
-            Text(
-                text = text,
-                style = MaterialTheme.typography.bodyLarge,
-                modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
-            )
-        }
+private fun UserRow(text: String, initial: String) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.End,
+        verticalAlignment = Alignment.Bottom,
+    ) {
+        Text(
+            text = text,
+            style = MaterialTheme.typography.bodyLarge,
+            color = Color.White,
+            modifier = Modifier.widthIn(max = 300.dp),
+        )
+        Spacer(Modifier.width(10.dp))
+        UserAvatar(initial = initial)
     }
 }
 
+/** Assistant message: sparkle mark on the left, muted off-white prose. */
 @Composable
 private fun AssistantBlock(entry: ChatEntry) {
-    Column(modifier = Modifier.fillMaxWidth()) {
-        if (entry.reasoning.isNotBlank()) ReasoningCard(entry.reasoning, entry.streaming)
+    Row(modifier = Modifier.fillMaxWidth()) {
+        SparkleAvatar(
+            size = 20.dp,
+            modifier = Modifier.padding(top = 3.dp),
+        )
+        Spacer(Modifier.width(12.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            if (entry.reasoning.isNotBlank()) ReasoningCard(entry.reasoning, entry.streaming)
 
-        if (entry.text.isNotBlank()) {
-            MarkdownText(text = entry.text, modifier = Modifier.fillMaxWidth())
-        } else if (entry.streaming) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
-                Spacer(Modifier.width(10.dp))
-                Text(
-                    text = "Thinking…",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+            if (entry.text.isNotBlank()) {
+                MarkdownText(text = entry.text, modifier = Modifier.fillMaxWidth())
+            } else if (entry.streaming) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(14.dp),
+                        strokeWidth = 2.dp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.width(10.dp))
+                    Text(
+                        text = "Thinking…",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
             }
         }
     }
@@ -337,10 +391,10 @@ private fun ReasoningCard(reasoning: String, streaming: Boolean) {
     var expanded by rememberSaveable { mutableStateOf(false) }
     Surface(
         color = MaterialTheme.colorScheme.surfaceVariant,
-        shape = RoundedCornerShape(10.dp),
-        modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+        shape = RoundedCornerShape(12.dp),
+        modifier = Modifier.fillMaxWidth().padding(bottom = 10.dp),
     ) {
-        Column(modifier = Modifier.clickable { expanded = !expanded }.padding(10.dp)) {
+        Column(modifier = Modifier.clickable { expanded = !expanded }.padding(12.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(
                     Icons.Filled.Insights,
@@ -374,21 +428,21 @@ private fun ReasoningCard(reasoning: String, streaming: Boolean) {
     }
 }
 
+/** Flat floating card for a tool run — no borders, one step above the canvas. */
 @Composable
 private fun ToolCard(run: ToolRun, onOpenFile: (String) -> Unit) {
     var expanded by rememberSaveable(run.callId) { mutableStateOf(false) }
     val filePath = remember(run.argumentsJson) { pathArgument(run.argumentsJson) }
 
     Surface(
-        color = MaterialTheme.colorScheme.surface,
-        shape = RoundedCornerShape(10.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        shape = RoundedCornerShape(12.dp),
         modifier = Modifier.fillMaxWidth(),
     ) {
         Column(
             modifier = Modifier
-                .background(MaterialTheme.colorScheme.surface)
                 .clickable { expanded = !expanded }
-                .padding(10.dp),
+                .padding(12.dp),
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 ToolStatusIcon(run.status)
@@ -446,6 +500,7 @@ private fun ToolStatusIcon(status: ToolStatus) {
         ToolStatus.RUNNING -> CircularProgressIndicator(
             modifier = Modifier.size(15.dp),
             strokeWidth = 2.dp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
 
         ToolStatus.AWAITING_APPROVAL -> Icon(
@@ -488,13 +543,13 @@ private fun statusSuffix(status: ToolStatus): String = when (status) {
 
 @Composable
 private fun BannerRow(
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    icon: ImageVector,
     text: String,
     tint: Color,
     container: Color,
 ) {
-    Surface(color = container, shape = RoundedCornerShape(10.dp), modifier = Modifier.fillMaxWidth()) {
-        Row(modifier = Modifier.padding(10.dp), verticalAlignment = Alignment.Top) {
+    Surface(color = container, shape = RoundedCornerShape(12.dp), modifier = Modifier.fillMaxWidth()) {
+        Row(modifier = Modifier.padding(12.dp), verticalAlignment = Alignment.Top) {
             Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.size(16.dp))
             Spacer(Modifier.width(9.dp))
             Text(text = text, style = MaterialTheme.typography.bodySmall, color = tint)
@@ -502,113 +557,169 @@ private fun BannerRow(
     }
 }
 
-// ---- composer + starter --------------------------------------------------
+// ---- composer -------------------------------------------------------------
 
+/**
+ * The floating capsule: rounded pill (#2F2F2F) holding, left to right, a plus
+ * button, a camera button, a borderless "Message" field, and a trailing slot
+ * that is a soundwave voice button while empty and an upright send arrow once
+ * there is text. While the agent runs, the slot becomes stop (+ background).
+ */
 @Composable
 private fun Composer(
     value: String,
     onValueChange: (String) -> Unit,
     isRunning: Boolean,
     chatOnly: Boolean,
-    onToggleChatOnly: (Boolean) -> Unit,
+    hasProject: Boolean,
+    onPickFile: () -> Unit,
+    onTakePhoto: () -> Unit,
+    onVoice: () -> Unit,
     onSend: () -> Unit,
     onStop: () -> Unit,
     onRunInBackground: (android.content.Context) -> Unit,
 ) {
-    val haptics = LocalHapticFeedback.current
+    var attachMenuOpen by remember { mutableStateOf(false) }
     val ctx = LocalContext.current
 
-    Surface(color = MaterialTheme.colorScheme.surface) {
-        Column(modifier = Modifier.animateContentSize()) {
-            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .imePadding()
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+    ) {
+        Surface(
+            color = MaterialTheme.colorScheme.surfaceContainerHigh,
+            shape = RoundedCornerShape(28.dp),
+            shadowElevation = 3.dp,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Row(
+                verticalAlignment = Alignment.Bottom,
+                modifier = Modifier.padding(start = 2.dp, end = 8.dp, top = 4.dp, bottom = 4.dp),
+            ) {
+                // Far left: plus button for attachments.
+                Box {
+                    IconButton(onClick = { attachMenuOpen = true }) {
+                        Icon(
+                            Icons.Filled.Add,
+                            contentDescription = "Add",
+                            tint = MaterialTheme.colorScheme.onBackground,
+                        )
+                    }
+                    DropdownMenu(
+                        expanded = attachMenuOpen,
+                        onDismissRequest = { attachMenuOpen = false },
+                        shape = RoundedCornerShape(16.dp),
+                        containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+                    ) {
+                        DropdownMenuItem(
+                            text = { Text("Attach file") },
+                            onClick = {
+                                attachMenuOpen = false
+                                onPickFile()
+                            },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Take photo") },
+                            onClick = {
+                                attachMenuOpen = false
+                                onTakePhoto()
+                            },
+                        )
+                        if (isRunning) {
+                            DropdownMenuItem(
+                                text = { Text("Continue in background") },
+                                leadingIcon = {
+                                    Icon(Icons.Filled.NotificationsActive, contentDescription = null)
+                                },
+                                onClick = {
+                                    attachMenuOpen = false
+                                    onRunInBackground(ctx)
+                                },
+                            )
+                        }
+                        if (!hasProject) {
+                            DropdownMenuItem(
+                                text = {
+                                    Text(
+                                        "Create a project first (Projects tab)",
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                },
+                                onClick = {
+                                    attachMenuOpen = false
+                                },
+                            )
+                        }
+                    }
+                }
 
-            // Build / Chat Only switch. Chat Only strips every project tool from
-            // the model — pure conversation; use_skill still works so style
-            // skills like caveman keep applying.
-            Row(modifier = Modifier.fillMaxWidth().padding(start = 10.dp, end = 10.dp, top = 8.dp)) {
-                SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
-                    SegmentedButton(
-                        selected = !chatOnly,
-                        onClick = {
-                            if (chatOnly) {
-                                haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                onToggleChatOnly(false)
-                            }
-                        },
-                        shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
-                        label = { Text("Build", style = MaterialTheme.typography.labelMedium) },
-                        icon = {},
-                    )
-                    SegmentedButton(
-                        selected = chatOnly,
-                        onClick = {
-                            if (!chatOnly) {
-                                haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                onToggleChatOnly(true)
-                            }
-                        },
-                        shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
-                        label = { Text("Chat Only", style = MaterialTheme.typography.labelMedium) },
-                        icon = {},
+                // Mid left: camera.
+                IconButton(onClick = onTakePhoto) {
+                    Icon(
+                        Icons.Filled.PhotoCamera,
+                        contentDescription = "Camera",
+                        tint = MaterialTheme.colorScheme.onBackground,
                     )
                 }
-            }
 
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .imePadding()
-                    .padding(horizontal = 10.dp, vertical = 8.dp),
-                verticalAlignment = Alignment.Bottom,
-            ) {
+                // Center: borderless message field.
                 TextField(
                     value = value,
                     onValueChange = onValueChange,
                     modifier = Modifier.weight(1f).heightIn(max = 160.dp),
                     placeholder = {
-                        Text(if (chatOnly) "Ask anything…" else "Ask OpenCode to build something…")
+                        Text(
+                            text = "Message",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                     },
                     maxLines = 6,
-                    shape = RoundedCornerShape(14.dp),
                     colors = TextFieldDefaults.colors(
+                        focusedContainerColor = Color.Transparent,
+                        unfocusedContainerColor = Color.Transparent,
+                        disabledContainerColor = Color.Transparent,
                         focusedIndicatorColor = Color.Transparent,
                         unfocusedIndicatorColor = Color.Transparent,
                         disabledIndicatorColor = Color.Transparent,
+                        cursorColor = MaterialTheme.colorScheme.onBackground,
+                        focusedTextColor = MaterialTheme.colorScheme.onBackground,
+                        unfocusedTextColor = MaterialTheme.colorScheme.onBackground,
                     ),
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Default),
                     keyboardActions = KeyboardActions(onSend = { onSend() }),
                 )
-                Spacer(Modifier.width(8.dp))
-                if (isRunning) {
-                    // Background Agent Mode (feature 12): hand the running turn to a
-                    // foreground service with progress notifications.
-                    IconButton(onClick = { onRunInBackground(ctx) }, modifier = Modifier.size(48.dp)) {
-                        Icon(
-                            Icons.Filled.NotificationsActive,
-                            contentDescription = "Continue in background",
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+
+                // Far right: voice when empty, send when there is text.
+                when {
+                    isRunning -> {
+                        IconButton(onClick = { onRunInBackground(ctx) }) {
+                            Icon(
+                                Icons.Filled.NotificationsActive,
+                                contentDescription = "Continue in background",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        RoundAction(
+                            icon = Icons.Filled.Stop,
+                            contentDescription = "Stop",
+                            onClick = onStop,
                         )
                     }
-                    FilledIconButton(
-                        onClick = onStop,
-                        colors = IconButtonDefaults.filledIconButtonColors(
-                            containerColor = MaterialTheme.colorScheme.errorContainer,
-                            contentColor = MaterialTheme.colorScheme.error,
-                        ),
-                        modifier = Modifier.size(48.dp),
-                    ) {
-                        Icon(Icons.Filled.Stop, contentDescription = "Stop")
-                    }
-                } else {
-                    FilledIconButton(
-                        onClick = {
-                            haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                            onSend()
-                        },
-                        enabled = value.isNotBlank(),
-                        modifier = Modifier.size(48.dp),
-                    ) {
-                        Icon(Icons.Filled.Send, contentDescription = "Send")
+
+                    value.isNotBlank() -> RoundAction(
+                        icon = Icons.Filled.ArrowUpward,
+                        contentDescription = "Send",
+                        onClick = onSend,
+                    )
+
+                    else -> IconButton(onClick = onVoice) {
+                        Icon(
+                            Icons.Filled.GraphicEq,
+                            contentDescription = "Voice mode",
+                            tint = MaterialTheme.colorScheme.onBackground,
+                        )
                     }
                 }
             }
@@ -616,81 +727,121 @@ private fun Composer(
     }
 }
 
+/** ChatGPT-style circular trailing action: filled with the inverse color. */
+@Composable
+private fun RoundAction(
+    icon: ImageVector,
+    contentDescription: String,
+    onClick: () -> Unit,
+) {
+    Box(
+        contentAlignment = Alignment.Center,
+        modifier = Modifier
+            .padding(start = 2.dp, bottom = 6.dp, top = 6.dp, end = 2.dp)
+            .size(36.dp)
+            .background(MaterialTheme.colorScheme.primary, CircleShape)
+            .clickable(onClick = onClick),
+    ) {
+        Icon(
+            icon,
+            contentDescription = contentDescription,
+            tint = MaterialTheme.colorScheme.onPrimary,
+            modifier = Modifier.size(20.dp),
+        )
+    }
+}
+
+// ---- starter --------------------------------------------------------------
+
 @Composable
 private fun StarterPanel(
     hasProvider: Boolean,
     onOpenSettings: () -> Unit,
     onPick: (String) -> Unit,
 ) {
-    Column(
-        modifier = Modifier.fillMaxSize().padding(20.dp),
-        verticalArrangement = Arrangement.Center,
-    ) {
-        Text("OpenCode", style = MaterialTheme.typography.headlineSmall)
-        Spacer(Modifier.height(6.dp))
-        Text(
-            text = "A coding agent that runs on this phone. It writes files, clones repos " +
-                "over HTTPS and previews sites locally. No desktop, no server.",
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
+    Column(modifier = Modifier.fillMaxSize().padding(horizontal = 24.dp)) {
+        Box(
+            contentAlignment = Alignment.Center,
+            modifier = Modifier.weight(1f).fillMaxWidth(),
+        ) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                SparkleAvatar(size = 46.dp)
+                Spacer(Modifier.height(16.dp))
+                Text(
+                    text = "opencode",
+                    style = MaterialTheme.typography.headlineSmall,
+                    color = MaterialTheme.colorScheme.onBackground,
+                )
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    text = "A coding agent that runs on this phone. It writes files, " +
+                        "clones repos over HTTPS and previews sites locally.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 8.dp),
+                )
 
-        if (!hasProvider) {
-            Spacer(Modifier.height(16.dp))
-            Surface(
-                color = MaterialTheme.colorScheme.errorContainer,
-                shape = RoundedCornerShape(12.dp),
-            ) {
-                Column(modifier = Modifier.padding(14.dp)) {
-                    Text(
-                        "No API key yet",
-                        style = MaterialTheme.typography.titleSmall,
-                        color = MaterialTheme.colorScheme.onErrorContainer,
-                    )
-                    Spacer(Modifier.height(4.dp))
-                    Text(
-                        "Add any provider key — OpenRouter, Anthropic, OpenAI, Gemini, Groq, " +
-                            "DeepSeek or a custom endpoint.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onErrorContainer,
-                    )
-                    Spacer(Modifier.height(10.dp))
-                    Button(onClick = onOpenSettings) { Text("Open Settings") }
+                if (!hasProvider) {
+                    Spacer(Modifier.height(18.dp))
+                    Surface(
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier.clickable(onClick = onOpenSettings),
+                    ) {
+                        Column(modifier = Modifier.padding(14.dp)) {
+                            Text(
+                                "No API key yet",
+                                style = MaterialTheme.typography.titleSmall,
+                                color = MaterialTheme.colorScheme.onBackground,
+                            )
+                            Spacer(Modifier.height(4.dp))
+                            Text(
+                                "Tap to add any provider — OpenRouter, Anthropic, OpenAI, " +
+                                    "Gemini, Groq, DeepSeek or a custom endpoint.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
                 }
             }
         }
 
-        Spacer(Modifier.height(22.dp))
         Text(
             "TRY",
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        Spacer(Modifier.height(8.dp))
+        Spacer(Modifier.height(10.dp))
         Suggestions.forEach { suggestion ->
             Surface(
                 color = MaterialTheme.colorScheme.surfaceVariant,
-                shape = RoundedCornerShape(10.dp),
+                shape = RoundedCornerShape(14.dp),
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(bottom = 8.dp)
                     .clickable { onPick(suggestion) },
             ) {
                 Row(
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Icon(
                         Icons.Filled.Terminal,
                         contentDescription = null,
                         modifier = Modifier.size(15.dp),
-                        tint = MaterialTheme.colorScheme.primary,
+                        tint = MaterialTheme.colorScheme.secondary,
                     )
                     Spacer(Modifier.width(10.dp))
-                    Text(suggestion, style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        suggestion,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onBackground,
+                    )
                 }
             }
         }
+        Spacer(Modifier.height(6.dp))
     }
 }
 
@@ -741,7 +892,7 @@ private fun ApprovalSheet(
     }
 }
 
-// ---- helpers -------------------------------------------------------------
+// ---- helpers --------------------------------------------------------------
 
 private val PrettyJson = Json { prettyPrint = true }
 
@@ -758,4 +909,42 @@ private fun pathArgument(raw: String): String? {
     val obj = runCatching { LenientJson.parseToJsonElement(raw) as? JsonObject }.getOrNull() ?: return null
     val path = runCatching { obj["path"]?.jsonPrimitive?.content }.getOrNull() ?: return null
     return path.takeIf { it.isNotBlank() && !it.endsWith("/") }
+}
+
+private fun userInitial(githubLogin: String): String =
+    githubLogin.trim().firstOrNull()?.uppercaseChar()?.toString() ?: "U"
+
+private fun appendMention(draft: String, relPath: String): String {
+    val mention = "[attached: $relPath]"
+    return if (draft.isBlank()) mention else "$draft $mention"
+}
+
+/** Copies a picked/captured file into the active project's uploads/ folder. */
+private fun importToUploads(context: Context, uri: Uri, projectPath: String?): String? {
+    if (projectPath.isNullOrBlank()) return null
+    return runCatching {
+        val resolver = context.contentResolver
+        val queried = resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
+            ?.use { cursor ->
+                if (cursor.moveToFirst()) cursor.getString(0) else null
+            }
+        val name = queried ?: "file-${System.currentTimeMillis()}"
+        val safe = name.replace(Regex("[^A-Za-z0-9._ -]"), "_").ifBlank { "file" }
+        val uploads = File(projectPath, "uploads").apply { mkdirs() }
+        var dest = File(uploads, safe)
+        var n = 1
+        while (dest.exists()) {
+            val dot = safe.lastIndexOf('.')
+            dest = if (dot > 0) {
+                File(uploads, "${safe.substring(0, dot)}-$n${safe.substring(dot)}")
+            } else {
+                File(uploads, "$safe-$n")
+            }
+            n++
+        }
+        resolver.openInputStream(uri)?.use { input ->
+            dest.outputStream().use { output -> input.copyTo(output) }
+        } ?: return null
+        "uploads/${dest.name}"
+    }.getOrNull()
 }

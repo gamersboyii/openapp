@@ -11,11 +11,7 @@ import kotlinx.serialization.json.add
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
-import kotlinx.serialization.json.int
 import kotlinx.serialization.json.intOrNull
-import kotlinx.serialization.json.jsonArray
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
 import kotlinx.serialization.json.putJsonObject
@@ -85,7 +81,7 @@ class OpenAiCompatProvider : LlmProvider {
 
             it.forEachSseEvent { sse ->
                 if (sse.data == "[DONE]") return@forEachSseEvent false
-                val chunk = runCatching { LlmJson.parseToJsonElement(sse.data).jsonObject }.getOrNull()
+                val chunk = runCatching { LlmJson.parseToJsonElement(sse.data).safeObj }.getOrNull()
                     ?: return@forEachSseEvent true
 
                 chunk["error"]?.let { err ->
@@ -93,36 +89,36 @@ class OpenAiCompatProvider : LlmProvider {
                     return@forEachSseEvent false
                 }
 
-                chunk["usage"]?.jsonObject?.let { u ->
+                chunk["usage"].safeObj?.let { u ->
                     usage = Usage(
-                        inputTokens = u["prompt_tokens"]?.jsonPrimitive?.intOrNull ?: 0,
-                        outputTokens = u["completion_tokens"]?.jsonPrimitive?.intOrNull ?: 0,
+                        inputTokens = u["prompt_tokens"].safePrim?.intOrNull ?: 0,
+                        outputTokens = u["completion_tokens"].safePrim?.intOrNull ?: 0,
                     )
                 }
 
-                val choice = chunk["choices"]?.jsonArray?.firstOrNull()?.jsonObject
+                val choice = chunk["choices"].safeArr?.firstOrNull().safeObj
                     ?: return@forEachSseEvent true
-                choice["finish_reason"]?.jsonPrimitive?.contentOrNull?.let { reason -> finish = reason }
+                choice["finish_reason"].safePrim?.contentOrNull?.let { reason -> finish = reason }
 
-                val delta = choice["delta"]?.jsonObject ?: return@forEachSseEvent true
+                val delta = choice["delta"].safeObj ?: return@forEachSseEvent true
 
-                delta["content"]?.jsonPrimitive?.contentOrNull
+                delta["content"].safePrim?.contentOrNull
                     ?.takeIf { text -> text.isNotEmpty() }
                     ?.let { text -> emit(LlmEvent.TextDelta(text)) }
 
                 // DeepSeek uses reasoning_content, OpenRouter uses reasoning.
-                (delta["reasoning_content"] ?: delta["reasoning"])?.jsonPrimitive?.contentOrNull
+                (delta["reasoning_content"] ?: delta["reasoning"]).safePrim?.contentOrNull
                     ?.takeIf { text -> text.isNotEmpty() }
                     ?.let { text -> emit(LlmEvent.ReasoningDelta(text)) }
 
-                delta["tool_calls"]?.jsonArray?.forEach { raw ->
-                    val call = raw.jsonObject
-                    val index = call["index"]?.jsonPrimitive?.intOrNull ?: 0
+                delta["tool_calls"].safeArr?.forEach { raw ->
+                    val call = raw.safeObj ?: return@forEach
+                    val index = call["index"].safePrim?.intOrNull ?: 0
                     val slot = partial.getOrPut(index) { PartialCall() }
-                    call["id"]?.jsonPrimitive?.contentOrNull?.let { id -> slot.id = id }
-                    call["function"]?.jsonObject?.let { fn ->
-                        fn["name"]?.jsonPrimitive?.contentOrNull?.let { n -> slot.name = n }
-                        fn["arguments"]?.jsonPrimitive?.contentOrNull?.let { a -> slot.args.append(a) }
+                    call["id"].safePrim?.contentOrNull?.let { id -> slot.id = id }
+                    call["function"].safeObj?.let { fn ->
+                        fn["name"].safePrim?.contentOrNull?.let { n -> slot.name = n }
+                        fn["arguments"].safePrim?.contentOrNull?.let { a -> slot.args.append(a) }
                     }
                 }
                 true
@@ -151,8 +147,8 @@ class OpenAiCompatProvider : LlmProvider {
             Http.client.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) return@withContext emptyList()
                 val body = response.body?.string().orEmpty()
-                LlmJson.parseToJsonElement(body).jsonObject["data"]?.jsonArray
-                    ?.mapNotNull { it.jsonObject["id"]?.jsonPrimitive?.contentOrNull }
+                LlmJson.parseToJsonElement(body).safeObj?.get("data").safeArr
+                    ?.mapNotNull { it.safeObj?.get("id")?.safePrim?.contentOrNull }
                     ?.sorted()
                     .orEmpty()
             }
@@ -237,4 +233,4 @@ internal class PartialCall {
 }
 
 internal fun JsonObject.intOr(key: String, fallback: Int): Int =
-    this[key]?.jsonPrimitive?.runCatching { int }?.getOrNull() ?: fallback
+    this[key].safePrim?.intOrNull ?: fallback

@@ -13,9 +13,6 @@ import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
-import kotlinx.serialization.json.jsonArray
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
 import kotlinx.serialization.json.putJsonObject
@@ -94,7 +91,7 @@ class GeminiProvider : LlmProvider {
             var usage: Usage? = null
 
             it.forEachSseEvent { sse ->
-                val json = runCatching { LlmJson.parseToJsonElement(sse.data).jsonObject }.getOrNull()
+                val json = runCatching { LlmJson.parseToJsonElement(sse.data).safeObj }.getOrNull()
                     ?: return@forEachSseEvent true
 
                 json["error"]?.let { err ->
@@ -102,31 +99,31 @@ class GeminiProvider : LlmProvider {
                     return@forEachSseEvent false
                 }
 
-                json["usageMetadata"]?.jsonObject?.let { meta ->
+                json["usageMetadata"].safeObj?.let { meta ->
                     usage = Usage(
-                        inputTokens = meta["promptTokenCount"]?.jsonPrimitive?.intOrNull ?: 0,
-                        outputTokens = meta["candidatesTokenCount"]?.jsonPrimitive?.intOrNull ?: 0,
+                        inputTokens = meta["promptTokenCount"].safePrim?.intOrNull ?: 0,
+                        outputTokens = meta["candidatesTokenCount"].safePrim?.intOrNull ?: 0,
                     )
                 }
 
-                val candidate = json["candidates"]?.jsonArray?.firstOrNull()?.jsonObject
+                val candidate = json["candidates"].safeArr?.firstOrNull().safeObj
                     ?: return@forEachSseEvent true
-                candidate["finishReason"]?.jsonPrimitive?.contentOrNull?.let { reason -> finish = reason }
+                candidate["finishReason"].safePrim?.contentOrNull?.let { reason -> finish = reason }
 
-                candidate["content"]?.jsonObject?.get("parts")?.jsonArray?.forEach { rawPart ->
-                    val part = rawPart.jsonObject
-                    part["text"]?.jsonPrimitive?.contentOrNull
+                candidate["content"].safeObj?.get("parts").safeArr?.forEach { rawPart ->
+                    val part = rawPart.safeObj ?: return@forEach
+                    part["text"].safePrim?.contentOrNull
                         ?.takeIf { text -> text.isNotEmpty() }
                         ?.let { text ->
-                            if (part["thought"]?.jsonPrimitive?.contentOrNull == "true") {
+                            if (part["thought"].safePrim?.contentOrNull == "true") {
                                 emit(LlmEvent.ReasoningDelta(text))
                             } else {
                                 emit(LlmEvent.TextDelta(text))
                             }
                         }
 
-                    part["functionCall"]?.jsonObject?.let { fn ->
-                        val name = fn["name"]?.jsonPrimitive?.contentOrNull.orEmpty()
+                    part["functionCall"].safeObj?.let { fn ->
+                        val name = fn["name"].safePrim?.contentOrNull.orEmpty()
                         if (name.isNotBlank()) {
                             // Gemini does not issue call ids; synthesize a stable one.
                             calls += ToolCall(
@@ -156,9 +153,9 @@ class GeminiProvider : LlmProvider {
             Http.client.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) return@withContext emptyList()
                 LlmJson.parseToJsonElement(response.body?.string().orEmpty())
-                    .jsonObject["models"]?.jsonArray
+                    .safeObj?.get("models").safeArr
                     ?.mapNotNull { entry ->
-                        entry.jsonObject["name"]?.jsonPrimitive?.contentOrNull
+                        entry.safeObj?.get("name")?.safePrim?.contentOrNull
                             ?.removePrefix("models/")
                     }
                     ?.filter { name -> name.startsWith("gemini") }

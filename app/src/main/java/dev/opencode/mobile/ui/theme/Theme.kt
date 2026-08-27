@@ -19,17 +19,26 @@ import androidx.compose.ui.unit.sp
 import androidx.core.view.WindowCompat
 import dev.opencode.mobile.core.settings.ThemeMode
 
-// Tuned for long reading sessions on an OLED phone: near-black surfaces, one
-// blue accent for actions, green/red reserved for diff and tool status.
-private val Ink = Color(0xFF0C0E13)
-private val Surface1 = Color(0xFF12151C)
-private val Surface2 = Color(0xFF181C25)
-private val Line = Color(0xFF262B38)
-private val TextHigh = Color(0xFFE7EAF2)
-private val TextLow = Color(0xFF98A1B6)
-private val Accent = Color(0xFF7AA2F7)
-private val Positive = Color(0xFF9ECE6A)
-private val Negative = Color(0xFFF7768E)
+/*
+ * ChatGPT-style flat canvas palette.
+ *
+ * Dark: one pure flat background (#191919) with no structural borders; cards
+ * float on it as slightly lighter planes (#212121) and interactive surfaces
+ * (the input capsule, code blocks) sit one step higher (#2F2F2F). Assistant
+ * prose is muted off-white (#ECECF1); user messages are pure white. Buttons
+ * invert (white fill, near-black content) exactly like the official app.
+ */
+
+// Shared canvas tokens.
+val ChatCanvas = Color(0xFF191919)
+val ChatSurface = Color(0xFF212121)
+val ChatCapsule = Color(0xFF2F2F2F)
+val ChatText = Color(0xFFECECF1)
+val ChatTextMuted = Color(0xFFACACB7)
+val OpenAiGreen = Color(0xFF10A37F)
+
+private val Positive = Color(0xFF68C287)
+private val Negative = Color(0xFFEF6C6C)
 private val Warning = Color(0xFFE0AF68)
 
 val DiffAdded = Positive
@@ -37,43 +46,63 @@ val DiffRemoved = Negative
 val StatusWarning = Warning
 
 private val DarkScheme = darkColorScheme(
-    primary = Accent,
-    onPrimary = Color(0xFF0B0D12),
-    primaryContainer = Color(0xFF1E2A45),
-    onPrimaryContainer = Accent,
-    secondary = Positive,
-    onSecondary = Color(0xFF0B0D12),
+    primary = Color.White,
+    onPrimary = Color(0xFF0D0D0D),
+    primaryContainer = ChatCapsule,
+    onPrimaryContainer = Color.White,
+    secondary = OpenAiGreen,
+    onSecondary = Color.White,
+    secondaryContainer = Color(0xFF1A3831),
+    onSecondaryContainer = Color(0xFF9BD9C4),
     tertiary = Warning,
-    background = Ink,
-    onBackground = TextHigh,
-    surface = Surface1,
-    onSurface = TextHigh,
-    surfaceVariant = Surface2,
-    onSurfaceVariant = TextLow,
-    surfaceContainer = Surface2,
-    surfaceContainerHigh = Color(0xFF1E222C),
-    outline = Line,
-    outlineVariant = Color(0xFF1E222C),
+    background = ChatCanvas,
+    onBackground = ChatText,
+    surface = ChatCanvas,
+    onSurface = ChatText,
+    surfaceVariant = ChatSurface,
+    onSurfaceVariant = ChatTextMuted,
+    surfaceContainer = ChatSurface,
+    surfaceContainerLow = Color(0xFF1E1E1E),
+    surfaceContainerHigh = ChatCapsule,
+    surfaceContainerHighest = Color(0xFF3A3A3A),
+    outline = Color(0xFF2F2F2F),
+    outlineVariant = Color(0xFF242424),
     error = Negative,
-    onError = Color(0xFF0B0D12),
-    errorContainer = Color(0xFF3A1D25),
-    onErrorContainer = Negative,
+    onError = Color(0xFF0D0D0D),
+    errorContainer = Color(0xFF3B1D1D),
+    onErrorContainer = Color(0xFFFF9B9B),
+    inverseSurface = Color(0xFFECECF1),
+    inverseOnSurface = Color(0xFF191919),
 )
 
 private val LightScheme = lightColorScheme(
-    primary = Color(0xFF2E5AAC),
+    primary = Color(0xFF0D0D0D),
     onPrimary = Color.White,
-    primaryContainer = Color(0xFFDDE6FB),
-    onPrimaryContainer = Color(0xFF14213C),
-    secondary = Color(0xFF3F7A2E),
-    background = Color(0xFFFAFBFD),
-    onBackground = Color(0xFF15181F),
-    surface = Color.White,
-    onSurface = Color(0xFF15181F),
-    surfaceVariant = Color(0xFFEFF1F6),
-    onSurfaceVariant = Color(0xFF525A6B),
-    outline = Color(0xFFD5D9E2),
-    error = Color(0xFFB3261E),
+    primaryContainer = Color(0xFFECECEC),
+    onPrimaryContainer = Color(0xFF0D0D0D),
+    secondary = OpenAiGreen,
+    onSecondary = Color.White,
+    secondaryContainer = Color(0xFFD9F2E8),
+    onSecondaryContainer = Color(0xFF0B3B2C),
+    tertiary = Color(0xFF9A6700),
+    background = Color(0xFFFFFFFF),
+    onBackground = Color(0xFF0D0D0D),
+    surface = Color(0xFFFFFFFF),
+    onSurface = Color(0xFF0D0D0D),
+    surfaceVariant = Color(0xFFF4F4F4),
+    onSurfaceVariant = Color(0xFF8F8F8F),
+    surfaceContainer = Color(0xFFF4F4F4),
+    surfaceContainerLow = Color(0xFFF9F9F9),
+    surfaceContainerHigh = Color(0xFFECECEC),
+    surfaceContainerHighest = Color(0xFFE4E4E4),
+    outline = Color(0xFFE5E5E5),
+    outlineVariant = Color(0xFFECECEC),
+    error = Color(0xFFEF4146),
+    onError = Color.White,
+    errorContainer = Color(0xFFFDE7E7),
+    onErrorContainer = Color(0xFF93201F),
+    inverseSurface = Color(0xFF0D0D0D),
+    inverseOnSurface = Color(0xFFF4F4F4),
 )
 
 private val AppTypography = Typography(

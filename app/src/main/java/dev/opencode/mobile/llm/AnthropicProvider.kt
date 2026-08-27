@@ -12,9 +12,6 @@ import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
-import kotlinx.serialization.json.jsonArray
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
 import okhttp3.MediaType.Companion.toMediaType
@@ -74,46 +71,46 @@ class AnthropicProvider : LlmProvider {
             var outputTokens = 0
 
             it.forEachSseEvent { sse ->
-                val json = runCatching { LlmJson.parseToJsonElement(sse.data).jsonObject }.getOrNull()
+                val json = runCatching { LlmJson.parseToJsonElement(sse.data).safeObj }.getOrNull()
                     ?: return@forEachSseEvent true
 
-                when (sse.event ?: json["type"]?.jsonPrimitive?.contentOrNull) {
+                when (sse.event ?: json["type"].safePrim?.contentOrNull) {
                     "message_start" -> {
-                        inputTokens = json["message"]?.jsonObject
-                            ?.get("usage")?.jsonObject
-                            ?.get("input_tokens")?.jsonPrimitive?.intOrNull ?: 0
+                        inputTokens = json["message"].safeObj
+                            ?.get("usage").safeObj
+                            ?.get("input_tokens").safePrim?.intOrNull ?: 0
                     }
 
                     "content_block_start" -> {
-                        val index = json["index"]?.jsonPrimitive?.intOrNull ?: 0
-                        val block = json["content_block"]?.jsonObject
-                        if (block?.get("type")?.jsonPrimitive?.contentOrNull == "tool_use") {
+                        val index = json["index"].safePrim?.intOrNull ?: 0
+                        val block = json["content_block"].safeObj
+                        if (block?.get("type")?.safePrim?.contentOrNull == "tool_use") {
                             partial[index] = PartialCall().apply {
-                                id = block["id"]?.jsonPrimitive?.contentOrNull.orEmpty()
-                                name = block["name"]?.jsonPrimitive?.contentOrNull.orEmpty()
+                                id = block["id"]?.safePrim?.contentOrNull.orEmpty()
+                                name = block["name"]?.safePrim?.contentOrNull.orEmpty()
                             }
                         }
                     }
 
                     "content_block_delta" -> {
-                        val index = json["index"]?.jsonPrimitive?.intOrNull ?: 0
-                        val delta = json["delta"]?.jsonObject ?: return@forEachSseEvent true
-                        when (delta["type"]?.jsonPrimitive?.contentOrNull) {
-                            "text_delta" -> delta["text"]?.jsonPrimitive?.contentOrNull
+                        val index = json["index"].safePrim?.intOrNull ?: 0
+                        val delta = json["delta"].safeObj ?: return@forEachSseEvent true
+                        when (delta["type"].safePrim?.contentOrNull) {
+                            "text_delta" -> delta["text"].safePrim?.contentOrNull
                                 ?.let { text -> emit(LlmEvent.TextDelta(text)) }
 
-                            "thinking_delta" -> delta["thinking"]?.jsonPrimitive?.contentOrNull
+                            "thinking_delta" -> delta["thinking"].safePrim?.contentOrNull
                                 ?.let { text -> emit(LlmEvent.ReasoningDelta(text)) }
 
-                            "input_json_delta" -> delta["partial_json"]?.jsonPrimitive?.contentOrNull
+                            "input_json_delta" -> delta["partial_json"].safePrim?.contentOrNull
                                 ?.let { chunk -> partial[index]?.args?.append(chunk) }
                         }
                     }
 
                     "message_delta" -> {
-                        json["delta"]?.jsonObject?.get("stop_reason")?.jsonPrimitive?.contentOrNull
+                        json["delta"].safeObj?.get("stop_reason").safePrim?.contentOrNull
                             ?.let { reason -> stopReason = reason }
-                        json["usage"]?.jsonObject?.get("output_tokens")?.jsonPrimitive?.intOrNull
+                        json["usage"].safeObj?.get("output_tokens").safePrim?.intOrNull
                             ?.let { count -> outputTokens = count }
                     }
 
@@ -146,8 +143,8 @@ class AnthropicProvider : LlmProvider {
             Http.client.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) return@withContext emptyList()
                 LlmJson.parseToJsonElement(response.body?.string().orEmpty())
-                    .jsonObject["data"]?.jsonArray
-                    ?.mapNotNull { it.jsonObject["id"]?.jsonPrimitive?.contentOrNull }
+                    .safeObj?.get("data").safeArr
+                    ?.mapNotNull { it.safeObj?.get("id")?.safePrim?.contentOrNull }
                     .orEmpty()
             }
         }.getOrDefault(emptyList())
@@ -239,5 +236,5 @@ class AnthropicProvider : LlmProvider {
 }
 
 internal fun parseArgs(raw: String): JsonObject =
-    runCatching { LlmJson.parseToJsonElement(raw.ifBlank { "{}" }).jsonObject }
+    runCatching { LlmJson.parseToJsonElement(raw.ifBlank { "{}" }).safeObj }
         .getOrDefault(JsonObject(emptyMap()))
