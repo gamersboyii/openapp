@@ -237,4 +237,4 @@ class AnthropicProvider : LlmProvider {
 
 internal fun parseArgs(raw: String): JsonObject =
     runCatching { LlmJson.parseToJsonElement(raw.ifBlank { "{}" }).safeObj }
-        .getOrDefault(JsonObject(emptyMap()))
+        .getOrNull() ?: JsonObject(emptyMap())

@@ -9,11 +9,11 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.Json
+import dev.opencode.mobile.llm.safePrim
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.add
-import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
 import okhttp3.MediaType.Companion.toMediaType
@@ -72,7 +72,7 @@ class GitHubClient(private val token: String) {
     private fun apiError(code: Int, body: String): String {
         val parsed = runCatching {
             val obj = json.decodeFromString(JsonObject.serializer(), body)
-            obj["message"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+            obj["message"].safePrim?.contentOrNull?.takeIf { it.isNotBlank() }
         }.getOrNull()
         return ("HTTP $code · ${parsed ?: STATUS.getOrDefault(code, "request failed")}")
             .redactSecrets()

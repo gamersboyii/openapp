@@ -14,12 +14,12 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import dev.opencode.mobile.llm.safePrim
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
-import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
@@ -227,8 +227,8 @@ class GitHubSession(
 }
 
 private fun JsonObject.str(key: String): String? =
-    this[key]?.jsonPrimitive?.contentOrNull
+    this[key].safePrim?.contentOrNull
 
 private fun JsonObject.intOf(key: String): Int? =
-    this[key]?.jsonPrimitive?.intOrNull
+    this[key].safePrim?.intOrNull
 

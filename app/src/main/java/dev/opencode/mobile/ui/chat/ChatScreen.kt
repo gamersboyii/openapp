@@ -97,10 +97,11 @@ import dev.opencode.mobile.ui.components.UserAvatar
 import dev.opencode.mobile.ui.review.TurnReviewBar
 import dev.opencode.mobile.ui.theme.MonoStyle
 import dev.opencode.mobile.ui.theme.StatusWarning
+import dev.opencode.mobile.llm.safePrim
 import java.io.File
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.contentOrNull
 
 private val Suggestions = listOf(
     "Build a landing page for a coffee shop, then preview it",
@@ -211,7 +212,6 @@ fun ChatScreen(
                             entry = entry,
                             initial = userInitial(settings.githubLogin),
                             onOpenFile = onOpenFile,
-                            modifier = Modifier.animateItem(),
                         )
                     }
                 }
@@ -907,7 +907,7 @@ private fun prettyArgs(raw: String): String {
 /** Pulls a `path` argument out so the tool card can offer to open the file. */
 private fun pathArgument(raw: String): String? {
     val obj = runCatching { LenientJson.parseToJsonElement(raw) as? JsonObject }.getOrNull() ?: return null
-    val path = runCatching { obj["path"]?.jsonPrimitive?.content }.getOrNull() ?: return null
+    val path = obj["path"].safePrim?.contentOrNull ?: return null
     return path.takeIf { it.isNotBlank() && !it.endsWith("/") }
 }
 

@@ -12,13 +12,13 @@ import dev.opencode.mobile.core.preview.PreviewServer
 import dev.opencode.mobile.core.settings.AppSettings
 import dev.opencode.mobile.core.exec.TerminalService
 import dev.opencode.mobile.llm.ToolSpec
+import dev.opencode.mobile.llm.safePrim
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
-import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonObject
 
@@ -74,20 +74,20 @@ interface AgentTool {
 
 // ---- JSON argument helpers -------------------------------------------------
 
-fun JsonObject.str(key: String): String? = this[key]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+fun JsonObject.str(key: String): String? = this[key].safePrim?.contentOrNull?.takeIf { it.isNotBlank() }
 
 fun JsonObject.requireStr(key: String): String =
     str(key) ?: throw IllegalArgumentException("Missing required argument '$key'")
 
 fun JsonObject.bool(key: String, fallback: Boolean = false): Boolean {
-    val primitive = this[key] as? JsonPrimitive ?: return fallback
+    val primitive = this[key].safePrim ?: return fallback
     return primitive.booleanOrNull
         ?: primitive.contentOrNull?.equals("true", ignoreCase = true)
         ?: fallback
 }
 
 fun JsonObject.int(key: String, fallback: Int): Int =
-    this[key]?.jsonPrimitive?.intOrNull ?: fallback
+    this[key].safePrim?.intOrNull ?: fallback
 
 // ---- Schema helpers ------------------------------------------------------
 

@@ -3,9 +3,9 @@ package dev.opencode.mobile.core.build
 import dev.opencode.mobile.core.exec.CommandRun
 import dev.opencode.mobile.core.exec.RunState
 import dev.opencode.mobile.core.exec.TerminalService
+import dev.opencode.mobile.llm.safeObj
 import java.io.File
 import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.jsonObject
 
 enum class BuildAction(val label: String) {
     DETECT("detect"),
@@ -149,9 +149,9 @@ class BuildSystem {
     }
 
     private fun packageJsonDependencies(file: File): Set<String> = runCatching {
-        val obj = Json.parseToJsonElement(file.readText()).jsonObject
-        (obj["dependencies"]?.jsonObject?.keys.orEmpty() +
-            obj["devDependencies"]?.jsonObject?.keys.orEmpty()).toSet()
+        val obj = Json.parseToJsonElement(file.readText()).safeObj ?: return@runCatching emptySet<String>()
+        (obj["dependencies"].safeObj?.keys.orEmpty() +
+            obj["devDependencies"].safeObj?.keys.orEmpty()).toSet()
     }.getOrDefault(emptySet())
 
     // ---- recipes -----------------------------------------------------------
