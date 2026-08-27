@@ -821,7 +821,7 @@ private val DiffOkGreen = androidx.compose.ui.graphics.Color(0xFF9ECE6A)
 private inline fun <reified T> ListOrState(
     state: Loadable<List<T>>,
     emptyText: String = "Nothing here.",
-    row: @Composable crossinline (T) -> Unit,
+    crossinline row: @Composable (T) -> Unit,
 ) {
     when {
         state.error != null -> TabError(state.error!!)
