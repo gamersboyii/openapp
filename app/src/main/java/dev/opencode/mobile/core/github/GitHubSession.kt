@@ -151,7 +151,7 @@ class GitHubSession(
             _devicePrompt.value = prompt
             _notice.value = ""
 
-            val intervalMs = ((startResponse.intOf("interval") ?: 5).coerceAtLeast(3)) * 1000L
+            var intervalMs = ((startResponse.intOf("interval") ?: 5).coerceAtLeast(3)) * 1000L
             val expiresAt = System.currentTimeMillis() +
                 ((startResponse.intOf("expires_in") ?: 900).coerceAtLeast(60)) * 1000L
 
@@ -215,7 +215,7 @@ class GitHubSession(
                 )
                 .build()
             Http.client.newCall(request).execute().use { response ->
-                val text = runCatching { response.body?.string() }.getOrDefault("")
+                val text = runCatching { response.body?.string() ?: "" }.getOrDefault("")
                 val obj = runCatching { json.decodeFromString(JsonObject.serializer(), text) }.getOrNull()
                     ?: JsonObject(emptyMap())
                 if (!response.isSuccessful && obj.str("error") == null) {

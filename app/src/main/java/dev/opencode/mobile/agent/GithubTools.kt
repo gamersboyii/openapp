@@ -88,7 +88,7 @@ object GithubRepoInfoTool : AgentTool {
         "Fetch one repository's details by owner/name slug or https URL: default branch, " +
             "permissions, clone URL, sizes. Read-only."
     override val parameters =
-        schema("repo" to stringProp("owner/name or an https://github.com/... URL", required = true))
+        schema("repo" to stringProp("owner/name or an https://github.com/... URL"), required = listOf("repo"))
 
     override suspend fun execute(args: JsonObject, context: ToolContext): String {
         val repo = context.requireGithub()
@@ -116,10 +116,11 @@ object GithubCreateRepoTool : AgentTool {
         "Create a new repository on the user's GitHub account. Use auto_init=true for an empty " +
             "initial commit when you plan to push code to it afterwards."
     override val parameters = schema(
-        "name" to stringProp("Repository name", required = true),
+        "name" to stringProp("Repository name"),
         "description" to stringProp("Short description"),
         "private" to boolProp("Private repository. Default false."),
         "auto_init" to boolProp("Create an initial README commit. Default true."),
+        required = listOf("name"),
     )
 
     override suspend fun execute(args: JsonObject, context: ToolContext): String {
@@ -144,7 +145,7 @@ object GithubBranchesTool : AgentTool {
     override val name = "github_branches"
     override val description = "List branches of a GitHub repository with their head SHAs. Read-only."
     override val parameters =
-        schema("repo" to stringProp("owner/name or https URL", required = true))
+        schema("repo" to stringProp("owner/name or https URL"), required = listOf("repo"))
 
     override suspend fun execute(args: JsonObject, context: ToolContext): String {
         val slug = normalizeSlug(args.requireStr("repo"))
@@ -164,9 +165,10 @@ object GithubCommitsTool : AgentTool {
     override val description =
         "List recent commits on a branch of a GitHub repository (SHA, author, subject). Read-only."
     override val parameters = schema(
-        "repo" to stringProp("owner/name or https URL", required = true),
+        "repo" to stringProp("owner/name or https URL"),
         "branch" to stringProp("Branch or ref; defaults to the repository default branch."),
         "limit" to intProp("Max commits (default 20, cap 60)."),
+        required = listOf("repo"),
     )
 
     override suspend fun execute(args: JsonObject, context: ToolContext): String {
@@ -188,9 +190,10 @@ object GithubIssuesTool : AgentTool {
     override val description =
         "List issues of a GitHub repository (pull requests excluded): number, state, title, labels. Read-only."
     override val parameters = schema(
-        "repo" to stringProp("owner/name or https URL", required = true),
+        "repo" to stringProp("owner/name or https URL"),
         "state" to stringProp("open | closed | all. Default open.", enum = listOf("open", "closed", "all")),
         "limit" to intProp("Max issues (default 30, cap 100)."),
+        required = listOf("repo"),
     )
 
     override suspend fun execute(args: JsonObject, context: ToolContext): String {
@@ -214,8 +217,9 @@ object GithubGetIssueTool : AgentTool {
         "Fetch one issue of a GitHub repository by number, including its body and recent comments. " +
             "Use this before fixing an issue so you know what is actually asked. Read-only."
     override val parameters = schema(
-        "repo" to stringProp("owner/name or https URL", required = true),
-        "number" to intProp("Issue number", required = true),
+        "repo" to stringProp("owner/name or https URL"),
+        "number" to intProp("Issue number"),
+        required = listOf("repo", "number"),
     )
 
     override suspend fun execute(args: JsonObject, context: ToolContext): String {
@@ -257,10 +261,11 @@ object GithubCreateIssueTool : AgentTool {
     override val mutating = true
     override val description = "Create an issue in a GitHub repository."
     override val parameters = schema(
-        "repo" to stringProp("owner/name or https URL", required = true),
-        "title" to stringProp("Issue title", required = true),
+        "repo" to stringProp("owner/name or https URL"),
+        "title" to stringProp("Issue title"),
         "body" to stringProp("Issue body (markdown)"),
         "labels" to stringProp("Comma-separated label names (must already exist)"),
+        required = listOf("repo", "title"),
     )
 
     override suspend fun execute(args: JsonObject, context: ToolContext): String {
@@ -286,9 +291,10 @@ object GithubCommentTool : AgentTool {
     override val description =
         "Post a comment on a GitHub issue or pull request (both share the comment API)."
     override val parameters = schema(
-        "repo" to stringProp("owner/name or https URL", required = true),
-        "number" to intProp("Issue or PR number", required = true),
-        "body" to stringProp("Comment body (markdown)", required = true),
+        "repo" to stringProp("owner/name or https URL"),
+        "number" to intProp("Issue or PR number"),
+        "body" to stringProp("Comment body (markdown)"),
+        required = listOf("repo", "number", "body"),
     )
 
     override suspend fun execute(args: JsonObject, context: ToolContext): String {
@@ -306,7 +312,7 @@ object GithubPullsTool : AgentTool {
     override val description =
         "List pull requests of a GitHub repository: number, state/draft, title, head→base. Read-only."
     override val parameters = schema(
-        "repo" to stringProp("owner/name or https URL", required = true),
+        "repo" to stringProp("owner/name or https URL"),
         "state" to stringProp("open | closed | all. Default open.", enum = listOf("open", "closed", "all")),
     )
 
@@ -335,8 +341,9 @@ object GithubGetPullTool : AgentTool {
     override val description =
         "Fetch one pull request: description, diff stat, review decisions and review comments. Read-only."
     override val parameters = schema(
-        "repo" to stringProp("owner/name or https URL", required = true),
-        "number" to intProp("PR number", required = true),
+        "repo" to stringProp("owner/name or https URL"),
+        "number" to intProp("PR number"),
+        required = listOf("repo", "number"),
     )
 
     override suspend fun execute(args: JsonObject, context: ToolContext): String {
@@ -376,12 +383,13 @@ object GithubCreatePullTool : AgentTool {
         "Open a pull request on GitHub. Call after committing and pushing the feature branch — " +
             "the head branch must exist on GitHub first. Reference the originating issue as 'Fixes #123'."
     override val parameters = schema(
-        "repo" to stringProp("owner/name or https URL", required = true),
-        "title" to stringProp("PR title", required = true),
-        "head" to stringProp("Feature branch that carries your changes", required = true),
+        "repo" to stringProp("owner/name or https URL"),
+        "title" to stringProp("PR title"),
+        "head" to stringProp("Feature branch that carries your changes"),
         "base" to stringProp("Target branch, e.g. main"),
         "body" to stringProp("PR description (markdown); mention 'Fixes #N' to close the issue on merge"),
         "draft" to boolProp("Create as draft. Default false."),
+        required = listOf("repo", "title", "head"),
     )
 
     override suspend fun execute(args: JsonObject, context: ToolContext): String {
@@ -410,9 +418,10 @@ object GithubActionsTool : AgentTool {
     override val description =
         "Recent GitHub Actions workflow runs for a repository: status, conclusion, branch. Read-only."
     override val parameters = schema(
-        "repo" to stringProp("owner/name or https URL", required = true),
+        "repo" to stringProp("owner/name or https URL"),
         "branch" to stringProp("Filter to one branch"),
         "limit" to intProp("Max runs (default 10, cap 25)."),
+        required = listOf("repo"),
     )
 
     override suspend fun execute(args: JsonObject, context: ToolContext): String {

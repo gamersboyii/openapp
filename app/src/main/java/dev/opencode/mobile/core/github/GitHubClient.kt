@@ -5,6 +5,7 @@ import dev.opencode.mobile.llm.Http
 import java.io.IOException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.Json
@@ -61,7 +62,7 @@ class GitHubClient(private val token: String) {
             val response: Response = runCatching { Http.client.newCall(builder.build()).execute() }
                 .getOrElse { error -> throw GitHubApiException(0, "Network error: ${error.message ?: "failed"}") }
             response.use { resp ->
-                val text = runCatching { resp.body?.string() }.getOrDefault("")
+                val text = runCatching { resp.body?.string() ?: "" }.getOrDefault("")
                 if (!resp.isSuccessful) throw GitHubApiException(resp.code, apiError(resp.code, text))
                 text
             }

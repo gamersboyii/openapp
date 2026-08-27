@@ -670,7 +670,7 @@ class AgentEngine(
             ToolRegistry.specs()
         }
 
-    private fun buildSystemPrompt(): String {
+    private suspend fun buildSystemPrompt(): String {
         val settings = settingsStore.settings.value
         val project = workspace.activeProject.value
 
@@ -811,7 +811,7 @@ class AgentEngine(
      * Blocks shared by every mode: active skills + the user's own instructions
      * (Custom instructions in Settings).
      */
-    private fun StringBuilder.appendPromptExtras(settings: AppSettings) {
+    private suspend fun StringBuilder.appendPromptExtras(settings: AppSettings) {
         if (settings.customInstructions.isNotBlank()) {
             appendLine()
             appendLine("USER INSTRUCTIONS:")

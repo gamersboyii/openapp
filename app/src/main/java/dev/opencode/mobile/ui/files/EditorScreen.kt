@@ -98,6 +98,7 @@ import dev.opencode.mobile.ui.theme.DiffAdded
 import dev.opencode.mobile.ui.theme.DiffRemoved
 import dev.opencode.mobile.ui.theme.MonoStyle
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 /** Past this size the editor drops autocomplete/pairing/bracket UI ("lite mode"). */
 private const val LITE_MODE_CHARS = 60_000
@@ -436,10 +437,10 @@ fun EditorScreen(relativePath: String, onBack: () -> Unit) {
         runCatching {
             val safeOffset = target.coerceIn(0, (value.text.length - 1).coerceAtLeast(0))
             val line = layout.getLineForOffset(safeOffset)
-            verticalScrollState.animateScrollTo((layout.getLineTop(line) - 96).coerceAtLeast(0))
+            verticalScrollState.animateScrollTo((layout.getLineTop(line).toInt() - 96).coerceAtLeast(0))
             if (!settings.wordWrap) {
                 val x = layout.getHorizontalPosition(safeOffset, usePrimaryDirection = true)
-                horizontalScrollState.animateScrollTo((x - 240).coerceAtLeast(0))
+                horizontalScrollState.animateScrollTo((x.toInt() - 240).coerceAtLeast(0))
             }
         }
     }
@@ -787,11 +788,10 @@ fun EditorScreen(relativePath: String, onBack: () -> Unit) {
                 }
 
                 // Autocomplete strip floats above the status bar.
-                AnimatedVisibility(
-                    visible = completions.isNotEmpty(),
-                    modifier = Modifier.align(Alignment.BottomCenter),
-                ) {
-                    CompletionStrip(words = completions, onPick = { word -> applyCompletion(word) })
+                if (completions.isNotEmpty()) {
+                    Box(modifier = Modifier.align(Alignment.BottomCenter)) {
+                        CompletionStrip(words = completions, onPick = { word -> applyCompletion(word) })
+                    }
                 }
             }
         }
@@ -1268,7 +1268,7 @@ private class CodeTransformation(
             findQuery?.let { query ->
                 try {
                     val options = if (caseSensitive) emptySet() else setOf(RegexOption.IGNORE_CASE)
-                    Regex(Regex.escape(query), *options.toTypedArray())
+                    Regex(Regex.escape(query), options)
                         .findAll(source)
                         .take(MAX_MARKED_MATCHES)
                         .forEachIndexed { i, m ->

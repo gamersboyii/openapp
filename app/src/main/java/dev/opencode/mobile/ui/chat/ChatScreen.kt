@@ -80,6 +80,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
@@ -515,6 +516,7 @@ private fun Composer(
     onRunInBackground: (android.content.Context) -> Unit,
 ) {
     val haptics = LocalHapticFeedback.current
+    val ctx = LocalContext.current
 
     Surface(color = MaterialTheme.colorScheme.surface) {
         Column(modifier = Modifier.animateContentSize()) {
@@ -580,7 +582,7 @@ private fun Composer(
                 if (isRunning) {
                     // Background Agent Mode (feature 12): hand the running turn to a
                     // foreground service with progress notifications.
-                    IconButton(onClick = onRunInBackground, modifier = Modifier.size(48.dp)) {
+                    IconButton(onClick = { onRunInBackground(ctx) }, modifier = Modifier.size(48.dp)) {
                         Icon(
                             Icons.Filled.NotificationsActive,
                             contentDescription = "Continue in background",

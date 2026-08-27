@@ -264,7 +264,7 @@ fun DiffFileCard(
                                 HunkApplyRow(
                                     total = current.size,
                                     pendingCount = applied?.let { prev ->
-                                        prev.symmetricDifference(rejected).size
+                                        ((prev - rejected).size + (rejected - prev).size)
                                     } ?: 0,
                                     showActions = onApplyHunkRevert != null,
                                     onApply = {

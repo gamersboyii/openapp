@@ -222,7 +222,7 @@ object Symbols {
         val out = ArrayList<CodeSymbol>(minOf(max, 64))
 
         text.lineSequence().forEachIndexed { index, raw ->
-            if (out.size >= max) return
+            if (out.size >= max) return out
             val line = raw.trim()
             if (line.isEmpty()) return@forEachIndexed
 

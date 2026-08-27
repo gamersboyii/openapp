@@ -63,6 +63,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.opencode.mobile.LocalContainer
 import dev.opencode.mobile.core.github.GhBranch
@@ -184,10 +185,10 @@ fun GitHubScreen(onOpenChat: () -> Unit) {
                         onOpenIssue = { issueNumber = it },
                         onOpenPull = { pullNumber = it },
                         onCloned = {
-                            snackbar.showSnackbar("Repository cloned — project switched.")
+                            container.scope.launch { snackbar.showSnackbar("Repository cloned — project switched.") }
                             onOpenChat()
                         },
-                        onNotice = { msg -> snackbar.showSnackbar(msg.redactSecrets()) },
+                        onNotice = { msg -> container.scope.launch { snackbar.showSnackbar(msg.redactSecrets()) } },
                     )
 
                 else -> RepositoriesPane(
@@ -215,13 +216,13 @@ fun GitHubScreen(onOpenChat: () -> Unit) {
     if (showCreateRepo) {
         CreateRepoDialog(
             onDismiss = { showCreateRepo = false },
-            onCreate = { name, description, private, autoInit ->
+            onCreate = { name, description, isPrivate, autoInit ->
                 showCreateRepo = false
                 val session = container.scope
                 session.launch {
-                    runCatching { client?.createRepo(name, description, private, autoInit) }
-                        .onSuccess { snackbar.showSnackbar("Created ${it.slug}") }
-                        .onFailure { snackbar.showSnackbar((it.message ?: "Create failed").redactSecrets()) }
+                    runCatching { client?.createRepo(name, description, isPrivate, autoInit) }
+                        .onSuccess { repo -> repo?.let { r -> container.scope.launch { snackbar.showSnackbar("Created ${r.slug}") } } }
+                        .onFailure { e -> container.scope.launch { snackbar.showSnackbar((e.message ?: "Create failed").redactSecrets()) } }
                 }
             },
         )
@@ -372,16 +373,17 @@ private fun RepositoriesPane(api: dev.opencode.mobile.core.github.GitHubClient, 
         }
     })
 
+    val reposSnapshot = repos
     when {
-        repos.error != null -> EmptyState(
+        reposSnapshot.error != null -> EmptyState(
             icon = Icons.Filled.Code,
             title = "Could not load repositories",
-            message = repos.error,
+            message = reposSnapshot.error,
         )
 
-        repos.value == null -> LoadingRow()
+        reposSnapshot.value == null -> LoadingRow()
 
-        repos.value.isEmpty() -> EmptyState(
+        reposSnapshot.value.isEmpty() -> EmptyState(
             icon = Icons.Filled.Code,
             title = "No repositories yet",
             message = "Repositories you own or collaborate on appear here.",
@@ -392,7 +394,7 @@ private fun RepositoriesPane(api: dev.opencode.mobile.core.github.GitHubClient, 
             contentPadding = PaddingValues(horizontal = 12.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            items(items = repos.value!!, key = { it.id }) { repo ->
+            items(items = reposSnapshot.value!!, key = { it.id }) { repo ->
                 RepoCard(repo = repo, onClick = { onOpenRepo(repo.slug) })
             }
         }
@@ -819,7 +821,7 @@ private val DiffOkGreen = androidx.compose.ui.graphics.Color(0xFF9ECE6A)
 private inline fun <reified T> ListOrState(
     state: Loadable<List<T>>,
     emptyText: String = "Nothing here.",
-    row: @Composable (T) -> Unit,
+    row: @Composable crossinline (T) -> Unit,
 ) {
     when {
         state.error != null -> TabError(state.error!!)
@@ -1048,13 +1050,15 @@ private fun CommentsBlock(
                             val body = commentDraft
                             commentDraft = ""
                             container.scope.launch {
-                                runCatching { api.addComment(slug, number, body) }
-                                    .onSuccess { posting = false; snackbar.showSnackbar("Comment posted") }
-                                    .onFailure {
-                                        posting = false
-                                        commentDraft = body
-                                        snackbar.showSnackbar((it.message ?: "Post failed").redactSecrets())
-                                    }
+                                try {
+                                    api.addComment(slug, number, body)
+                                    posting = false
+                                    snackbar.showSnackbar("Comment posted")
+                                } catch (e: Throwable) {
+                                    posting = false
+                                    commentDraft = body
+                                    snackbar.showSnackbar((e.message ?: "Post failed").redactSecrets())
+                                }
                             }
                         }
                     },
@@ -1064,4 +1068,37 @@ private fun CommentsBlock(
         }
         SnackbarHost(hostState = snackbar)
     }
+}
+
+@Composable
+private fun CreateRepoDialog(
+    onDismiss: () -> Unit,
+    onCreate: (String, String, Boolean, Boolean) -> Unit,
+) {
+    var name by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf("") }
+    var description by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf("") }
+    var isPrivate by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
+    var autoInit by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(true) }
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { androidx.compose.material3.Text("Create repository") },
+        text = {
+            androidx.compose.foundation.layout.Column(verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(8.dp)) {
+                androidx.compose.material3.OutlinedTextField(value = name, onValueChange = { name = it }, label = { androidx.compose.material3.Text("Name") }, singleLine = true)
+                androidx.compose.material3.OutlinedTextField(value = description, onValueChange = { description = it }, label = { androidx.compose.material3.Text("Description") })
+                androidx.compose.foundation.layout.Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                    androidx.compose.material3.Checkbox(checked = isPrivate, onCheckedChange = { isPrivate = it })
+                    androidx.compose.material3.Text(" Private", modifier = androidx.compose.ui.Modifier.clickable { isPrivate = !isPrivate })
+                }
+                androidx.compose.foundation.layout.Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                    androidx.compose.material3.Checkbox(checked = autoInit, onCheckedChange = { autoInit = it })
+                    androidx.compose.material3.Text(" Auto-init README", modifier = androidx.compose.ui.Modifier.clickable { autoInit = !autoInit })
+                }
+            }
+        },
+        confirmButton = {
+            androidx.compose.material3.TextButton(onClick = { onCreate(name.trim(), description.trim(), isPrivate, autoInit) }, enabled = name.isNotBlank()) { androidx.compose.material3.Text("Create") }
+        },
+        dismissButton = { androidx.compose.material3.TextButton(onClick = onDismiss) { androidx.compose.material3.Text("Cancel") } },
+    )
 }
