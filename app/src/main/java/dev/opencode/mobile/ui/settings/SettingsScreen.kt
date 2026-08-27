@@ -1,5 +1,6 @@
 package dev.opencode.mobile.ui.settings
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -16,7 +17,11 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.Refresh
@@ -67,7 +72,7 @@ import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SettingsScreen() {
+fun SettingsScreen(onOpenSkills: () -> Unit = {}) {
     val container = LocalContainer.current
     val store = container.settings
     val settings by store.settings.collectAsStateWithLifecycle()
@@ -78,6 +83,10 @@ fun SettingsScreen() {
     var showPresets by remember { mutableStateOf(false) }
     var fetching by remember { mutableStateOf(false) }
     var notice by remember { mutableStateOf<String?>(null) }
+    var showPromptEditor by remember { mutableStateOf(false) }
+
+    val instructionText by container.instructions.text.collectAsStateWithLifecycle()
+    val instructionModified by container.instructions.modified.collectAsStateWithLifecycle()
 
     val activeProvider = settings.activeProvider
 
@@ -341,6 +350,33 @@ fun SettingsScreen() {
                 Text("Create a GitHub token")
             }
 
+            // ---- github hub -----------------------------------------------
+            SectionHeader("GitHub Hub")
+
+            val ghAccount by container.github.account.collectAsStateWithLifecycle()
+            Surface(color = MaterialTheme.colorScheme.surface, shape = RoundedCornerShape(10.dp)) {
+                Row(modifier = Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Filled.Code, contentDescription = null, Modifier.size(18.dp))
+                    Spacer(Modifier.width(10.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Hub", style = MaterialTheme.typography.titleSmall)
+                        Text(
+                            text = ghAccount?.login
+                                ?: settings.githubLogin.ifBlank { "not signed in" },
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
+            Text(
+                "Sign in from the Hub tab to browse repos, read issues and PRs, watch Actions " +
+                    "and clone private repositories. That token also powers git push/pull.",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 16.dp),
+            )
+
             // ---- appearance ------------------------------------------------
             SectionHeader("Appearance")
             ThemeMode.entries.forEach { mode ->
@@ -376,6 +412,95 @@ fun SettingsScreen() {
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp),
             )
 
+            // ---- system prompt handbook -------------------------------------
+            SectionHeader("System prompt")
+            SettingSwitch(
+                title = "Use agent handbook",
+                subtitle = "Prepend the bundled INSTRUCTION.md operating handbook to every " +
+                    "system prompt. Turn off for minimal prompts.",
+                checked = settings.useSystemPrompt,
+                onCheckedChange = { value -> store.update { it.copy(useSystemPrompt = value) } },
+            )
+            Surface(
+                color = MaterialTheme.colorScheme.surface,
+                shape = RoundedCornerShape(10.dp),
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+            ) {
+                Row(modifier = Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        Icons.Filled.Description,
+                        contentDescription = null,
+                        Modifier.size(18.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.width(10.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("INSTRUCTION.md", style = MaterialTheme.typography.titleSmall)
+                        Text(
+                            text = when {
+                                !settings.useSystemPrompt -> "disabled"
+                                instructionModified -> "edited"
+                                else -> "bundled version"
+                            },
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    TextButton(onClick = { showPromptEditor = true }) { Text("Edit") }
+                    TextButton(
+                        enabled = instructionModified,
+                        onClick = {
+                            scope.launch { container.instructions.resetToBundled() }
+                        },
+                    ) { Text("Reset") }
+                }
+            }
+            Text(
+                text = "The handbook defines how the agent plans, verifies, protects your " +
+                    "code and handles permissions. Editing it changes every future turn.",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 16.dp),
+            )
+
+            // ---- skills ------------------------------------------------------
+            SectionHeader("Skills")
+            Surface(
+                color = MaterialTheme.colorScheme.surface,
+                shape = RoundedCornerShape(10.dp),
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)
+                    .clickable(onClick = onOpenSkills),
+            ) {
+                Row(modifier = Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        Icons.Filled.AutoAwesome,
+                        contentDescription = null,
+                        Modifier.size(18.dp),
+                        tint = if (settings.enabledSkills.isEmpty()) {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        } else {
+                            MaterialTheme.colorScheme.primary
+                        },
+                    )
+                    Spacer(Modifier.width(10.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Built-in skill library", style = MaterialTheme.typography.titleSmall)
+                        Text(
+                            text = "${settings.enabledSkills.size} active · Design, debugging, " +
+                                "minimalism, memory import & more",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Icon(
+                        Icons.Filled.ChevronRight,
+                        contentDescription = null,
+                        Modifier.size(18.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+
             SectionHeader("About")
             Text(
                 text = "OpenCode Mobile runs the whole agent on device: your key talks straight " +
@@ -397,6 +522,22 @@ fun SettingsScreen() {
                 showPresets = false
                 editing = preset.toConfig()
             },
+        )
+    }
+
+    if (showPromptEditor) {
+        SystemPromptEditorDialog(
+            initial = instructionText,
+            onDismiss = { showPromptEditor = false },
+            onSave = { value ->
+                showPromptEditor = false
+                container.instructions.update(value)
+            },
+            onReset = {
+                showPromptEditor = false
+                scope.launch { container.instructions.resetToBundled() }
+            },
+            modified = instructionModified,
         )
     }
 
@@ -691,5 +832,67 @@ private fun ProviderEditorDialog(
             }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
+// ---- system prompt editor ---------------------------------------------------
+
+/**
+ * Full-width editing surface for the bundled INSTRUCTION.md handbook. Text loads
+ * once when the dialog opens; Save persists to app storage and takes effect on
+ * the next agent turn.
+ */
+@Composable
+private fun SystemPromptEditorDialog(
+    initial: String,
+    modified: Boolean,
+    onDismiss: () -> Unit,
+    onSave: (String) -> Unit,
+    onReset: () -> Unit,
+) {
+    var text by remember { mutableStateOf(initial) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    Icons.Filled.Description,
+                    contentDescription = null,
+                    Modifier.size(18.dp),
+                    tint = MaterialTheme.colorScheme.primary,
+                )
+                Spacer(Modifier.width(8.dp))
+                Column {
+                    Text("System prompt")
+                    Text(
+                        text = if (modified) "edited — Reset restores the bundle" else "bundled version",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        },
+        text = {
+            OutlinedTextField(
+                value = text,
+                onValueChange = { text = it },
+                minLines = 14,
+                maxLines = 22,
+                textStyle = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.fillMaxWidth().heightIn(max = 460.dp),
+            )
+        },
+        confirmButton = {
+            Button(onClick = { onSave(text) }, enabled = text.isNotBlank()) { Text("Save") }
+        },
+        dismissButton = {
+            Row {
+                if (modified) {
+                    TextButton(onClick = onReset) { Text("Reset") }
+                }
+                TextButton(onClick = onDismiss) { Text("Cancel") }
+            }
+        },
     )
 }

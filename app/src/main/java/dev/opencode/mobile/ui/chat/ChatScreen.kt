@@ -1,5 +1,7 @@
 package dev.opencode.mobile.ui.chat
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -26,12 +28,14 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Info
@@ -52,6 +56,9 @@ import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -67,10 +74,13 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.animation.animateContentSize
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -107,6 +117,7 @@ fun ChatScreen(
     onOpenFile: (String) -> Unit,
     onOpenReview: () -> Unit,
     onOpenCheckpoints: () -> Unit,
+    onOpenSkills: () -> Unit = {},
 ) {
     val container = LocalContainer.current
     val agent = container.agent
@@ -120,6 +131,10 @@ fun ChatScreen(
 
     var draft by rememberSaveable { mutableStateOf("") }
     val listState = rememberLazyListState()
+
+    val permissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { }
 
     // Follow the tail only while the user is already there, so scrolling back
     // through history is not yanked forward by each streamed token.
@@ -150,6 +165,9 @@ fun ChatScreen(
                 }
             },
             actions = {
+                IconButton(onClick = onOpenSkills) {
+                    Icon(Icons.Filled.AutoAwesome, contentDescription = "Skills")
+                }
                 IconButton(onClick = onOpenCheckpoints) {
                     Icon(Icons.Filled.History, contentDescription = "Checkpoints")
                 }
@@ -180,7 +198,7 @@ fun ChatScreen(
                     verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
                     items(items = entries, key = { it.id }) { entry ->
-                        EntryRow(entry = entry, onOpenFile = onOpenFile)
+                        EntryRow(entry = entry, onOpenFile = onOpenFile, modifier = Modifier.animateItem())
                     }
                 }
             }
@@ -192,7 +210,7 @@ fun ChatScreen(
                 review = currentReview,
                 onReview = onOpenReview,
                 onAccept = { agent.acceptReview() },
-                onUndo = { agent.undoTurn() },
+                onRejectAll = { agent.undoTurn() },
             )
         }
 
@@ -200,6 +218,8 @@ fun ChatScreen(
             value = draft,
             onValueChange = { draft = it },
             isRunning = isRunning,
+            chatOnly = settings.chatOnly,
+            onToggleChatOnly = { value -> container.settings.update { it.copy(chatOnly = value) } },
             onSend = {
                 val text = draft.trim()
                 if (text.isNotEmpty()) {
@@ -208,6 +228,19 @@ fun ChatScreen(
                 }
             },
             onStop = { agent.cancel() },
+            onRunInBackground = { ctx ->
+                // API 33+: ask once for POST_NOTIFICATIONS; the foreground
+                // service starts regardless — notifications are just hidden
+                // while the permission is missing.
+                val granted = androidx.core.content.ContextCompat.checkSelfPermission(
+                    ctx,
+                    android.Manifest.permission.POST_NOTIFICATIONS,
+                ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+                if (!granted && android.os.Build.VERSION.SDK_INT >= 33) {
+                    permissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+                }
+                dev.opencode.mobile.bg.AgentForegroundService.start(ctx)
+            },
         )
     }
 
@@ -236,24 +269,26 @@ fun ChatScreen(
 // ---- entries --------------------------------------------------------------
 
 @Composable
-private fun EntryRow(entry: ChatEntry, onOpenFile: (String) -> Unit) {
-    when (entry.kind) {
-        EntryKind.USER -> UserBubble(entry.text)
-        EntryKind.ASSISTANT -> AssistantBlock(entry)
-        EntryKind.TOOL -> entry.toolRun?.let { ToolCard(it, onOpenFile) }
-        EntryKind.ERROR -> BannerRow(
-            icon = Icons.Filled.ErrorOutline,
-            text = entry.text,
-            tint = MaterialTheme.colorScheme.error,
-            container = MaterialTheme.colorScheme.errorContainer,
-        )
+private fun EntryRow(entry: ChatEntry, onOpenFile: (String) -> Unit, modifier: Modifier = Modifier) {
+    Column(modifier = modifier) {
+        when (entry.kind) {
+            EntryKind.USER -> UserBubble(entry.text)
+            EntryKind.ASSISTANT -> AssistantBlock(entry)
+            EntryKind.TOOL -> entry.toolRun?.let { ToolCard(it, onOpenFile) }
+            EntryKind.ERROR -> BannerRow(
+                icon = Icons.Filled.ErrorOutline,
+                text = entry.text,
+                tint = MaterialTheme.colorScheme.error,
+                container = MaterialTheme.colorScheme.errorContainer,
+            )
 
-        EntryKind.NOTICE -> BannerRow(
-            icon = Icons.Filled.Info,
-            text = entry.text,
-            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-            container = MaterialTheme.colorScheme.surfaceVariant,
-        )
+            EntryKind.NOTICE -> BannerRow(
+                icon = Icons.Filled.Info,
+                text = entry.text,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                container = MaterialTheme.colorScheme.surfaceVariant,
+            )
+        }
     }
 }
 
@@ -473,12 +508,50 @@ private fun Composer(
     value: String,
     onValueChange: (String) -> Unit,
     isRunning: Boolean,
+    chatOnly: Boolean,
+    onToggleChatOnly: (Boolean) -> Unit,
     onSend: () -> Unit,
     onStop: () -> Unit,
+    onRunInBackground: (android.content.Context) -> Unit,
 ) {
+    val haptics = LocalHapticFeedback.current
+
     Surface(color = MaterialTheme.colorScheme.surface) {
-        Column {
+        Column(modifier = Modifier.animateContentSize()) {
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+            // Build / Chat Only switch. Chat Only strips every project tool from
+            // the model — pure conversation; use_skill still works so style
+            // skills like caveman keep applying.
+            Row(modifier = Modifier.fillMaxWidth().padding(start = 10.dp, end = 10.dp, top = 8.dp)) {
+                SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                    SegmentedButton(
+                        selected = !chatOnly,
+                        onClick = {
+                            if (chatOnly) {
+                                haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                onToggleChatOnly(false)
+                            }
+                        },
+                        shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
+                        label = { Text("Build", style = MaterialTheme.typography.labelMedium) },
+                        icon = {},
+                    )
+                    SegmentedButton(
+                        selected = chatOnly,
+                        onClick = {
+                            if (!chatOnly) {
+                                haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                onToggleChatOnly(true)
+                            }
+                        },
+                        shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
+                        label = { Text("Chat Only", style = MaterialTheme.typography.labelMedium) },
+                        icon = {},
+                    )
+                }
+            }
+
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -490,7 +563,9 @@ private fun Composer(
                     value = value,
                     onValueChange = onValueChange,
                     modifier = Modifier.weight(1f).heightIn(max = 160.dp),
-                    placeholder = { Text("Ask OpenCode to build something…") },
+                    placeholder = {
+                        Text(if (chatOnly) "Ask anything…" else "Ask OpenCode to build something…")
+                    },
                     maxLines = 6,
                     shape = RoundedCornerShape(14.dp),
                     colors = TextFieldDefaults.colors(
@@ -503,6 +578,15 @@ private fun Composer(
                 )
                 Spacer(Modifier.width(8.dp))
                 if (isRunning) {
+                    // Background Agent Mode (feature 12): hand the running turn to a
+                    // foreground service with progress notifications.
+                    IconButton(onClick = onRunInBackground, modifier = Modifier.size(48.dp)) {
+                        Icon(
+                            Icons.Filled.NotificationsActive,
+                            contentDescription = "Continue in background",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                     FilledIconButton(
                         onClick = onStop,
                         colors = IconButtonDefaults.filledIconButtonColors(
@@ -515,7 +599,10 @@ private fun Composer(
                     }
                 } else {
                     FilledIconButton(
-                        onClick = onSend,
+                        onClick = {
+                            haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                            onSend()
+                        },
                         enabled = value.isNotBlank(),
                         modifier = Modifier.size(48.dp),
                     ) {

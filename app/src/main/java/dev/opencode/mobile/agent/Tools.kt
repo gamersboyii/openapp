@@ -301,7 +301,7 @@ object GitCloneTool : AgentTool {
                 url = url,
                 targetDir = dir,
                 branch = args.str("branch"),
-                credentials = context.settings.gitCredentials,
+                credentials = context.settings.effectiveGitCredentials,
             ) { task, percent ->
                 context.onProgress(if (percent >= 0) "$task $percent%" else task)
             }
@@ -344,7 +344,8 @@ object FetchRepoSnapshotTool : AgentTool {
                 url = url,
                 targetDir = dir,
                 branch = args.str("branch"),
-                token = context.settings.gitToken.takeIf { it.isNotBlank() },
+                token = context.settings.gitToken.takeIf { it.isNotBlank() }
+                    ?: context.settings.githubToken.takeIf { it.isNotBlank() },
             )
         }.getOrElse { error ->
             dir.deleteRecursively()
@@ -453,8 +454,9 @@ object GitPushTool : AgentTool {
 
     override suspend fun execute(args: JsonObject, context: ToolContext): String {
         val project = context.requireProject()
-        val credentials = context.settings.gitCredentials
-            ?: return "ERROR: no git token configured. Add one in Settings to push."
+        val credentials = context.settings.effectiveGitCredentials
+            ?: return "ERROR: no git token configured. Add one in Settings — or sign in to " +
+                "GitHub from the Hub tab — then push again."
         return context.git.push(project.dir, credentials, args.str("branch"))
     }
 }
@@ -467,7 +469,7 @@ object GitPullTool : AgentTool {
 
     override suspend fun execute(args: JsonObject, context: ToolContext): String {
         val project = context.requireProject()
-        return context.git.pull(project.dir, context.settings.gitCredentials)
+        return context.git.pull(project.dir, context.settings.effectiveGitCredentials)
     }
 }
 
@@ -708,6 +710,23 @@ object ToolRegistry {
         DevServerStartTool,
         DevServerStopTool,
         DevServerStatusTool,
+        // GitHub integration (feature 8)
+        GithubAuthTool,
+        GithubReposTool,
+        GithubRepoInfoTool,
+        GithubCreateRepoTool,
+        GithubBranchesTool,
+        GithubCommitsTool,
+        GithubIssuesTool,
+        GithubGetIssueTool,
+        GithubCreateIssueTool,
+        GithubCommentTool,
+        GithubPullsTool,
+        GithubGetPullTool,
+        GithubCreatePullTool,
+        GithubActionsTool,
+        // Built-in skills (use_skill stays reachable in Chat Only mode too)
+        UseSkillTool,
     )
 
     private val byName = tools.associateBy { it.name }

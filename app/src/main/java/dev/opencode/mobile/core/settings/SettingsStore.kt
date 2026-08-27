@@ -37,11 +37,23 @@ data class AppSettings(
     val gitUserEmail: String = "opencode@localhost",
     val gitUsername: String = "",
     val gitToken: String = "",
+    /** GitHub OAuth/PAT token for the Hub tab and github_* tools. Never logged, never sent to the model. */
+    val githubToken: String = "",
+    /** Cached account login from the last successful verification (display only). */
+    val githubLogin: String = "",
+    /** OAuth app client id used by the GitHub device flow. Not a secret, but user-supplied. */
+    val githubClientId: String = "",
     val editorFontSize: Int = 13,
     val wordWrap: Boolean = false,
     val themeMode: ThemeMode = ThemeMode.DARK,
     val lastProjectPath: String? = null,
     val customInstructions: String = "",
+    /** Prepend the bundled INSTRUCTION.md handbook to every system prompt. */
+    val useSystemPrompt: Boolean = true,
+    /** Chat Only: pure conversation, project tools stripped from the model. */
+    val chatOnly: Boolean = false,
+    /** Built-in skill ids whose descriptions ride along in every prompt. */
+    val enabledSkills: Set<String> = emptySet(),
     val onboarded: Boolean = false,
 ) {
     val activeProvider: ProviderConfig?
@@ -50,6 +62,11 @@ data class AppSettings(
     val gitCredentials: Pair<String, String>?
         get() = if (gitToken.isBlank()) null
         else (gitUsername.ifBlank { "x-access-token" }) to gitToken
+
+    /** Falls back to the GitHub session token when no explicit host token is set. */
+    val effectiveGitCredentials: Pair<String, String>?
+        get() = gitCredentials
+            ?: githubToken.takeIf { it.isNotBlank() }?.let { "x-access-token" to it }
 }
 
 /**
@@ -131,3 +148,17 @@ class SettingsStore(context: Context) {
         const val KEY = "settings_json_v1"
     }
 }
+
+/**
+ * Masks anything that looks like a credential before a string reaches the UI or
+ * a tool result. Defense in depth: tokens should never be in these strings in
+ * the first place, but redaction must not depend on that.
+ */
+fun String.redactSecrets(): String = redactTokenRegex.replace(this, "[redacted]")
+
+private val redactTokenRegex = Regex(
+    "gh[pousr]_[A-Za-z0-9]{16,}" + // classic PATs
+        "|github_pat_[A-Za-z0-9_]{20,}" + // fine-grained PATs
+        "|gho_[A-Za-z0-9]{16,}" + // OAuth tokens
+        "|[A-Fa-f0-9]{40}", // 40-hex tokens (legacy)
+)

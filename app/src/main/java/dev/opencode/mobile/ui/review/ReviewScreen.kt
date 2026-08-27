@@ -177,6 +177,27 @@ fun ReviewScreen(onBack: () -> Unit) {
                                     refresh++
                                 }
                             },
+                            onApplyHunkRevert = { rejectedIndices ->
+                                container.scope.launch {
+                                    val ok = runCatching {
+                                        checkpoints.revertHunks(
+                                            activeProject,
+                                            activeReview.checkpointId,
+                                            change.path,
+                                            rejectedIndices,
+                                        )
+                                    }.getOrDefault(false)
+                                    if (ok) {
+                                        container.workspace.notifyChanged()
+                                        if (container.preview.state.value.running) {
+                                            container.preview.signalReload()
+                                        }
+                                    }
+                                    // Re-read even on failure: state must not lie.
+                                    refresh++
+                                }
+                            },
+                            revisionKey = refresh,
                         )
                     }
                 }

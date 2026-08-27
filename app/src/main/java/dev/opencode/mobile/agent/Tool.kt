@@ -7,6 +7,7 @@ import dev.opencode.mobile.core.fs.Project
 import dev.opencode.mobile.core.fs.WorkspaceManager
 import dev.opencode.mobile.core.git.GitService
 import dev.opencode.mobile.core.git.RepoSnapshotService
+import dev.opencode.mobile.core.github.GitHubSession
 import dev.opencode.mobile.core.preview.PreviewServer
 import dev.opencode.mobile.core.settings.AppSettings
 import dev.opencode.mobile.core.exec.TerminalService
@@ -31,6 +32,8 @@ class ToolContext(
     val devServer: DevServerManager,
     val history: CommandHistoryStore,
     val settings: AppSettings,
+    /** Signed-in GitHub state; a null client means not signed in. */
+    val github: GitHubSession,
     /** Active project. Null until one is created or opened. */
     val project: Project?,
     /** Lets a tool report intermediate progress (clone percentage, file counts). */

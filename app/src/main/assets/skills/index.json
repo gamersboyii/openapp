@@ -1,0 +1,165 @@
+{
+  "version": 1,
+  "skills": [
+    {
+      "id": "taste-skill",
+      "name": "Taste — Anti-Slop Frontend",
+      "category": "Design",
+      "source": "github.com/leonxlnx/taste-skill",
+      "path": "skills/taste-skill/SKILL.md",
+      "description": "Anti-slop frontend skill for landing pages, portfolios and redesigns. Reads the brief, infers the design direction, ships interfaces that never look templated. Note: very long (~87KB)."
+    },
+    {
+      "id": "frontend-design",
+      "name": "Frontend Design",
+      "category": "Design",
+      "source": "github.com/anthropics/skills",
+      "path": "skills/frontend-design/SKILL.md",
+      "description": "Distinctive, intentional visual design when building new UI: aesthetic direction, typography, hero-as-thesis, choices that don't read as template defaults."
+    },
+    {
+      "id": "ui-ux-pro-max",
+      "name": "UI/UX Pro Max",
+      "category": "Design",
+      "source": "github.com/nextlevelbuilder/ui-ux-pro-max-skill",
+      "path": "skills/ui-ux-pro-max/SKILL.md",
+      "description": "AI-powered design intelligence: UI styles, color palettes, font pairings, UX guidelines, chart types across 20+ tech stacks (design-system workflow; on-device data search not bundled)."
+    },
+    {
+      "id": "caveman",
+      "name": "Caveman Mode",
+      "category": "Communication",
+      "source": "github.com/juliusbrussee/caveman",
+      "path": "skills/caveman/SKILL.md",
+      "description": "Ultra-compressed communication. Cuts output tokens ~65% by speaking like a caveman while keeping full technical accuracy. Intensities: lite / full / ultra / wenyan."
+    },
+    {
+      "id": "superpowers-overview",
+      "name": "Superpowers Overview",
+      "category": "Engineering Process",
+      "source": "github.com/obra/superpowers",
+      "path": "skills/superpowers-overview/SKILL.md",
+      "description": "Router skill for the Superpowers family: tells the agent which superpower to reach for (brainstorming, debugging, TDD, plans, reviews)."
+    },
+    {
+      "id": "superpowers-brainstorming",
+      "name": "Brainstorming",
+      "category": "Engineering Process",
+      "source": "github.com/obra/superpowers",
+      "path": "skills/superpowers-brainstorming/SKILL.md",
+      "description": "Turn vague ideas into validated designs through structured questioning, alternative exploration and requirement capture before any code is written."
+    },
+    {
+      "id": "superpowers-debugging",
+      "name": "Systematic Debugging",
+      "category": "Engineering Process",
+      "source": "github.com/obra/superpowers",
+      "path": "skills/superpowers-debugging/SKILL.md",
+      "description": "Four-phase root-cause discipline: reproduce, isolate with binary search, understand the mechanism fully, then fix — no blind patch-and-hope changes."
+    },
+    {
+      "id": "superpowers-tdd",
+      "name": "Test-Driven Development",
+      "category": "Engineering Process",
+      "source": "github.com/obra/superpowers",
+      "path": "skills/superpowers-tdd/SKILL.md",
+      "description": "Red-green-refactor loop: write the failing test first, watch it fail, write minimal code to pass, refactor with confidence."
+    },
+    {
+      "id": "superpowers-plans-writing",
+      "name": "Writing Plans",
+      "category": "Engineering Process",
+      "source": "github.com/obra/superpowers",
+      "path": "skills/superpowers-plans-writing/SKILL.md",
+      "description": "Write implementation plans that a fresh mind could execute without context: exact files, exact steps, verification per bite-sized task."
+    },
+    {
+      "id": "superpowers-plans-executing",
+      "name": "Executing Plans",
+      "category": "Engineering Process",
+      "source": "github.com/obra/superpowers",
+      "path": "skills/superpowers-plans-executing/SKILL.md",
+      "description": "Work through an implementation plan one task at a time, verifying each step before moving on instead of batching risky work."
+    },
+    {
+      "id": "superpowers-review-requesting",
+      "name": "Requesting Code Review",
+      "category": "Engineering Process",
+      "source": "github.com/obra/superpowers",
+      "path": "skills/superpowers-review-requesting/SKILL.md",
+      "description": "How to hand work to a reviewer so feedback is useful: scope the diff, name the risks, ask specific questions instead of 'looks good?'"
+    },
+    {
+      "id": "superpowers-review-receiving",
+      "name": "Receiving Code Review",
+      "category": "Engineering Process",
+      "source": "github.com/obra/superpowers",
+      "path": "skills/superpowers-review-receiving/SKILL.md",
+      "description": "Respond to review feedback like a professional: verify each claim technically, accept what's right, push back with evidence on what isn't."
+    },
+    {
+      "id": "superpowers-verification",
+      "name": "Verification Before Completion",
+      "category": "Engineering Process",
+      "source": "github.com/obra/superpowers",
+      "path": "skills/superpowers-verification/SKILL.md",
+      "description": "Never claim done without running the thing: evidence over confidence — build it, run it, see the output pass before saying success."
+    },
+    {
+      "id": "superpowers-subagents",
+      "name": "Subagent-Driven Development",
+      "category": "Engineering Process",
+      "source": "github.com/obra/superpowers",
+      "path": "skills/superpowers-subagents/SKILL.md",
+      "description": "Orchestrate narrow-context sub-agents with explicit specs and verification gates between stages for large multi-file work."
+    },
+    {
+      "id": "ponytail",
+      "name": "Ponytail — Lazy Senior Dev",
+      "category": "Code Minimalism",
+      "source": "github.com/dietrichgebert/ponytail",
+      "path": "skills/ponytail/SKILL.md",
+      "description": "Forces the laziest solution that actually works: YAGNI, stdlib before custom code, native features before dependencies, one line before fifty."
+    },
+    {
+      "id": "ponytail-audit",
+      "name": "Ponytail Audit",
+      "category": "Code Minimalism",
+      "source": "github.com/dietrichgebert/ponytail",
+      "path": "skills/ponytail-audit/SKILL.md",
+      "description": "Find what should be deleted in an existing codebase: dead code, speculative abstractions, dependencies doing one line of work."
+    },
+    {
+      "id": "ponytail-debt",
+      "name": "Ponytail Debt Ledger",
+      "category": "Code Minimalism",
+      "source": "github.com/dietrichgebert/ponytail",
+      "path": "skills/ponytail-debt/SKILL.md",
+      "description": "Track shortcuts honestly as debt entries with payback triggers, so deliberate laziness never turns into a trap."
+    },
+    {
+      "id": "ponytail-gain",
+      "name": "Ponytail Gain Review",
+      "category": "Code Minimalism",
+      "source": "github.com/dietrichgebert/ponytail",
+      "path": "skills/ponytail-gain/SKILL.md",
+      "description": "Before building anything, force the question: does the benefit justify the code? Sometimes the answer is don't build it."
+    },
+    {
+      "id": "ponytail-review",
+      "name": "Ponytail Review",
+      "category": "Code Minimalism",
+      "source": "github.com/dietrichgebert/ponytail",
+      "path": "skills/ponytail-review/SKILL.md",
+      "description": "Review diffs for over-engineering: needless abstraction, premature flexibility, configuration nobody asked for."
+    },
+    {
+      "id": "memory-import",
+      "name": "Import Memory from Another Assistant",
+      "category": "Memory",
+      "source": "bundled (import pipeline)",
+      "path": "skills/memory-import/SKILL.md",
+      "description": "Bring memories over from ChatGPT/Gemini/etc.: paste their export, get it filtered (privacy-safe), confirmed, and filed into structured memory/ files additively."
+    }
+  ]
+}

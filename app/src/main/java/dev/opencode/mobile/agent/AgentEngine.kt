@@ -11,9 +11,12 @@ import dev.opencode.mobile.core.fs.Project
 import dev.opencode.mobile.core.fs.WorkspaceManager
 import dev.opencode.mobile.core.git.GitService
 import dev.opencode.mobile.core.git.RepoSnapshotService
+import dev.opencode.mobile.core.github.GitHubSession
+import dev.opencode.mobile.core.instructions.InstructionStore
 import dev.opencode.mobile.core.preview.PreviewServer
 import dev.opencode.mobile.core.settings.AppSettings
 import dev.opencode.mobile.core.settings.SettingsStore
+import dev.opencode.mobile.core.skills.SkillStore
 import dev.opencode.mobile.llm.ChatMessage
 import dev.opencode.mobile.llm.LlmEvent
 import dev.opencode.mobile.llm.ProviderRegistry
@@ -77,7 +80,12 @@ data class TurnReview(
     val fileCount: Int,
     val added: Int,
     val removed: Int,
+    /** Per-file summary, newest-path last — shown directly on the review bar. */
+    val files: List<TurnFileStat> = emptyList(),
 )
+
+/** One row of "App.kt  +42 -18" on the review bar. */
+data class TurnFileStat(val path: String, val type: String, val added: Int, val removed: Int)
 
 @Serializable
 private data class SessionSnapshot(
@@ -104,6 +112,9 @@ class AgentEngine(
     private val devServer: DevServerManager,
     private val commandHistory: CommandHistoryStore,
     private val settingsStore: SettingsStore,
+    private val github: GitHubSession,
+    private val skills: SkillStore,
+    private val instructions: InstructionStore,
     private val scope: CoroutineScope,
 ) {
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true; prettyPrint = true }
@@ -126,6 +137,22 @@ class AgentEngine(
     private val _pendingReview = MutableStateFlow<TurnReview?>(null)
     val pendingReview: StateFlow<TurnReview?> = _pendingReview.asStateFlow()
 
+    /** Background mode: a turn pauses between steps while this is set (feature 12). */
+    private val _paused = MutableStateFlow(false)
+    val paused: StateFlow<Boolean> = _paused.asStateFlow()
+
+    /** Bounded recent-activity log mirrored into the background notification. */
+    private val _progress = MutableStateFlow<List<String>>(emptyList())
+    val progress: StateFlow<List<String>> = _progress.asStateFlow()
+
+    /** Files successfully written/edited/deleted by the current or last turn. */
+    private val _turnFilesChanged = MutableStateFlow(0)
+    val turnFilesChanged: StateFlow<Int> = _turnFilesChanged.asStateFlow()
+
+    /** Last user prompt; powers notification retry after a failed background turn. */
+    var lastPrompt: String = ""
+        private set
+
     private var approvalGate: CompletableDeferred<Boolean>? = null
     private var turnJob: Job? = null
     private var sessionDir: File? = null
@@ -140,6 +167,7 @@ class AgentEngine(
 
     fun send(userText: String) {
         if (_isRunning.value || userText.isBlank()) return
+        lastPrompt = userText.trim()
         turnJob = scope.launch { runTurn(userText.trim()) }
     }
 
@@ -149,6 +177,7 @@ class AgentEngine(
         approvalGate = null
         _pendingApproval.value = null
         _isRunning.value = false
+        _paused.value = false
         _status.value = ""
         updateStreamingEntries()
     }
@@ -157,6 +186,30 @@ class AgentEngine(
         approvalGate?.complete(approved)
         approvalGate = null
         _pendingApproval.value = null
+    }
+
+    // ---- background-mode controls (feature 12) -----------------------------
+
+    /** Takes effect at the next step boundary of a running turn. */
+    fun pause() {
+        if (_isRunning.value) {
+            _paused.value = true
+            _status.value = "Paused"
+            addProgress("‖ paused")
+        }
+    }
+
+    fun resume() {
+        if (_paused.value) {
+            _paused.value = false
+            _status.value = "Resuming…"
+            addProgress("▶ resumed")
+        }
+    }
+
+    /** Re-sends the last user prompt after a failed turn (failure recovery). */
+    fun retryLastTurn() {
+        if (!_isRunning.value && lastPrompt.isNotBlank()) send(lastPrompt)
     }
 
     /** Keeps the turn's changes; the checkpoint stays available for a later undo. */
@@ -242,10 +295,14 @@ class AgentEngine(
 
         _isRunning.value = true
         _status.value = "Thinking…"
+        _paused.value = false
+        _turnFilesChanged.value = 0
+        addProgress("✓ analysing project…")
 
         try {
             var step = 0
             while (step < settings.maxSteps) {
+                awaitIfPaused()
                 step++
                 val calls = streamOneAssistantTurn(provider, model, settings.temperature, settings.maxTokens)
                     ?: break // a provider error already surfaced
@@ -254,6 +311,7 @@ class AgentEngine(
 
                 for (call in calls) {
                     executeCall(call)
+                    awaitIfPaused()
                 }
 
                 if (step == settings.maxSteps) {
@@ -286,6 +344,21 @@ class AgentEngine(
     }
 
     /**
+     * Background-mode gate: blocks at step boundaries while paused. Polling keeps
+     * this simple and responsive; cancellation still arrives through the job.
+     */
+    private suspend fun awaitIfPaused() {
+        while (_paused.value && _isRunning.value) {
+            kotlinx.coroutines.delay(300)
+        }
+    }
+
+    /** Appends one line to the bounded progress log shown in notifications. */
+    private fun addProgress(line: String) {
+        _progress.value = (_progress.value + line).takeLast(MAX_PROGRESS_LINES)
+    }
+
+    /**
      * Turns the pre-turn checkpoint into a reviewable diff. Runs [NonCancellable] so a
      * stopped turn still surfaces (and can undo) whatever it managed to change. An empty
      * diff means nothing was written, so the spurious checkpoint is dropped.
@@ -299,12 +372,16 @@ class AgentEngine(
             runCatching { checkpoints.delete(project, checkpoint.id) }
             _pendingReview.value = null
         } else {
+            addProgress("• ${changes.size} file(s) changed")
             _pendingReview.value = TurnReview(
                 checkpointId = checkpoint.id,
                 label = checkpoint.label,
                 fileCount = changes.size,
                 added = changes.sumOf { it.added },
                 removed = changes.sumOf { it.removed },
+                files = changes.sortedByDescending { it.added + it.removed }
+                    .take(REVIEW_BAR_FILES)
+                    .map { TurnFileStat(it.path, it.type.name, it.added, it.removed) },
             )
         }
     }
@@ -332,7 +409,7 @@ class AgentEngine(
             model = model,
             systemPrompt = buildSystemPrompt(),
             messages = history.toList(),
-            tools = ToolRegistry.specs(),
+            tools = availableToolSpecs(),
             temperature = temperature,
             maxTokens = maxTokens,
         ).collect { event ->
@@ -398,6 +475,20 @@ class AgentEngine(
             return CallOutcome.FAILED
         }
 
+        // Chat Only mode strips the agent tools; anything else is refused with a
+        // pointer back to conversation so the model does not retry it.
+        if (settings.chatOnly && tool != UseSkillTool) {
+            val message = "ERROR: '${call.name}' is unavailable in Chat Only mode. " +
+                "The user disabled project actions for this chat — answer in text, or tell " +
+                "them to flip the composer switch back to Build if edits are really needed."
+            recordToolEntry(call, "blocked (Chat Only)", ToolStatus.DENIED, message)
+            history += ChatMessage(
+                role = Role.TOOL,
+                toolResult = ToolResult(call.id, call.name, message, isError = true),
+            )
+            return CallOutcome.DENIED
+        }
+
         val summary = runCatching { tool.summarize(args) }.getOrDefault(tool.name)
         val needsApproval = tool.needsApproval(args, settings)
         val entryId = recordToolEntry(
@@ -448,6 +539,7 @@ class AgentEngine(
             devServer = devServer,
             history = commandHistory,
             settings = settings,
+            github = github,
             project = workspace.activeProject.value,
             onProgress = { progress -> _status.value = "$summary — $progress" },
             onProjectChanged = { path ->
@@ -473,9 +565,22 @@ class AgentEngine(
         }
         history += ChatMessage(
             role = Role.TOOL,
-            toolResult = ToolResult(call.id, call.name, output.take(MAX_TOOL_RESULT_CHARS), isError = isError),
+            toolResult = ToolResult(
+                call.id,
+                call.name,
+                output.take(if (tool == UseSkillTool) UseSkillTool.MAX_SKILL_CHARS + 2_000 else MAX_TOOL_RESULT_CHARS),
+                isError = isError,
+            ),
         )
         workspace.notifyChanged()
+
+        // Background notification feed: ✓/✗ per finished call, plus a running
+        // count of touched files for the "Modified N files" line.
+        val mark = if (isError) "✗" else "✓"
+        addProgress("$mark ${summary.take(60)}")
+        if (!isError && tool.mutating && WRITE_COUNTING_TOOLS.contains(tool.name)) {
+            _turnFilesChanged.value += 1
+        }
         return if (isError) CallOutcome.FAILED else CallOutcome.DONE
     }
 
@@ -557,61 +662,95 @@ class AgentEngine(
 
     // ---- system prompt ----------------------------------------------------
 
+    /** Tool specs on offer right now; Chat Only trims the list to skills. */
+    private fun availableToolSpecs() =
+        if (settingsStore.settings.value.chatOnly) {
+            listOf(UseSkillTool.toSpec())
+        } else {
+            ToolRegistry.specs()
+        }
+
     private fun buildSystemPrompt(): String {
         val settings = settingsStore.settings.value
         val project = workspace.activeProject.value
 
+        // Chat Only mode: pure conversation. No project tools, no engineering
+        // scaffolding — just persona, active skills, and how to leave the mode.
+        if (settings.chatOnly) {
+            return buildString {
+                appendLine(
+                    """
+                    You are OpenCode in Chat Only mode, running on an Android phone.
+                    The user wants plain conversation in this chat: answer questions,
+                    explain ideas, plan work, review snippets they paste — but do NOT
+                    reach for project tools. Project file changes are disabled here.
+                    If a request genuinely needs you to create or modify a project,
+                    say so and tell them to switch the composer back to Build.
+                    """.trimIndent(),
+                )
+                appendPromptExtras(settings)
+            }
+        }
+
         return buildString {
+            // 1. The curated agent handbook (bundled INSTRUCTION.md, user-editable).
+            if (settings.useSystemPrompt) {
+                val base = instructions.text.value.trim()
+                if (base.isNotEmpty()) {
+                    appendLine(base.take(InstructionStore.MAX_PROMPT_CHARS))
+                    appendLine()
+                    appendLine(
+                        "The handbook above defines HOW you behave. The DEVICE FACTS below " +
+                            "describe what is actually true of THIS execution environment; " +
+                            "where the two disagree about concrete capabilities, the device facts win.",
+                    )
+                    appendLine()
+                }
+            }
+
+            // 2. Device / runtime facts (the on-phone reality).
             appendLine(
                 """
-                You are OpenCode, a coding agent running entirely on an Android phone.
-                You work by calling tools. Prefer acting over describing: read the files
-                you need, make the edit, then say what changed in one or two sentences.
-
-                ENVIRONMENT — read this carefully, it is unusual:
-                - Commands run through `run_command` on the phone's Android shell
-                  (toybox) inside a sandbox: working directory pinned to the project,
-                  fixed PATH, hard timeout, output caps. Basic inspection works
+                DEVICE EXECUTION FACTS — read this carefully, it is unusual:
+                - You run entirely on an Android phone. Commands go through `run_command`
+                  on the toybox shell inside a sandbox: working directory pinned to the
+                  project, fixed PATH, hard timeout, output caps. Basic inspection works
                   (ls, cat, grep, find, wc). By default there is NO Node.js/npm, NO
-                  Python, NO JDK/Gradle, NO cargo/go — ecosystem installs and builds
-                  fail with 'not found'. Never pretend a build succeeded. (An optional
-                  Node runtime pack, if the user installed one, enables real dev
-                  servers — see dev_server_start below.)
+                  Python, NO JDK/Gradle, NO cargo/go — ecosystem installs and builds fail
+                  with 'not found'. Never pretend a build succeeded. (An optional Node
+                  runtime pack enables real dev servers — see dev_server_start below.)
                 - Every command is classified before it runs: read-only commands run
                   immediately; anything that writes or installs asks the user;
                   destructive commands and access outside the project are blocked.
                   If a command was blocked, do not retry variations of it.
-                - `build_project` detects the project type and runs detect/install/
-                  build/test/run/clean, returning structured file:line diagnostics.
-                  Read them, fix the named files, then build again. For static web
+                - `build_project` detects the project type and runs detect/install/build/
+                  test/run/clean with structured file:line diagnostics. For static web
                   projects there is nothing to compile — use `preview` instead.
-                - For Node web apps (Vite/Next.js/React/Node), `dev_server_start` runs
-                  the actual dev server IF a Node runtime is present: it detects the
-                  project, installs dependencies, starts the dev command, sniffs the
-                  port, and points the Preview tab at it. If it returns no_runtime,
-                  say so and fall back to `preview` for static, zero-build sites.
-                  Check state with dev_server_status; shut it down with dev_server_stop.
+                - For Node web apps (Vite/Next.js/React/Node), `dev_server_start` runs the
+                  real dev server IF a Node runtime is present: detects, installs, starts,
+                  sniffs the port, points Preview at it. On no_runtime fall back to
+                  `preview` for static, zero-build sites. Check dev_server_status;
+                  stop with dev_server_stop.
                 - Web projects must work by opening an HTML file directly. Get dependencies
                   from a CDN (esm.sh, unpkg, jsdelivr) using an import map, or use a global
-                  script build. For React, JSX is compiled in-page by @babel/standalone.
-                - Tailwind is available through its CDN build (no PostCSS).
-                - Files live in a private sandbox for the active project. All paths are
-                  relative to the project root; `..` is rejected.
-                - Git works through JGit over HTTPS only. SSH remotes fail.
-                - `preview` serves the project on 127.0.0.1 and the Preview tab
-                  auto-reloads after every write. Call it once the site is worth looking at.
-                - The screen is small: keep replies short, avoid dumping whole files back
-                  to the user, and never paste a file you just wrote.
+                  script build. For React, JSX is compiled in-page by @babel/standalone;
+                  Tailwind via its CDN build (no PostCSS).
+                - Files live in a private sandbox for the active project. Paths are relative
+                  to the project root; `..` is rejected.
+                - Git goes through JGit over HTTPS only; SSH remotes fail.
+                - `preview` serves the project on 127.0.0.1 and the Preview tab auto-reloads
+                  after every write. Call it once the site is worth looking at.
+                - Screen is small: keep replies short, never dump whole files, never paste
+                  a file you just wrote.
 
-                WORKING RULES:
-                - Call `project_info` or `list_files` first when you do not know the layout.
-                - Read a file before editing it. `edit_file` needs an exact, unique match.
-                - Use `edit_file` for small changes, `write_file` for new or rewritten files.
-                - Batch related edits in one turn instead of asking after each step.
-                - When the user asks for a website or app, scaffold with `create_project`
-                  using the closest template, then customise it.
-                - After finishing a visual change, call `preview` so the user can see it.
-                - If a tool returns an error, fix the cause; do not repeat the same call.
+                PROJECT CREATION:
+                - You CAN build complete projects from scratch — this is expected here.
+                  When the user asks for any app/site/tool/game ("make me a to-do app",
+                  "build a portfolio site") with no suitable project open, call
+                  `create_project` with the closest template and flesh it out immediately.
+                  Scaffold first, ask questions later — wrong guesses are one edit away.
+                  After creating, keep building files until the thing actually works,
+                  then call `preview`.
                 """.trimIndent(),
             )
 
@@ -624,23 +763,63 @@ class AgentEngine(
                 appendLine("Templates available to create_project: ${Templates.ids.joinToString(", ")}.")
             }
 
+            // 3. Approval posture.
             if (settings.autoApproveWrites) {
                 appendLine("File writes are auto-approved; the user is not asked before each change.")
             } else {
                 appendLine("Every mutating tool call is shown to the user for approval before it runs.")
             }
-
             if (settings.autoApproveCommands) {
                 appendLine("Non-read-only commands and build steps are auto-approved after policy screening.")
             } else {
                 appendLine("Commands that are not read-only are shown to the user for approval first.")
             }
 
-            if (settings.customInstructions.isNotBlank()) {
+            appendPromptExtras(settings)
+
+            // 5. GitHub (feature 8). Only advertise what is usable.
+            if (github.client.value != null) {
+                val login = github.account.value?.login.orEmpty().ifBlank { "(checking…)" }
                 appendLine()
-                appendLine("USER INSTRUCTIONS:")
-                appendLine(settings.customInstructions.trim())
+                appendLine(
+                    "GITHUB — signed in as $login. Available: github_repos, github_repo_info, " +
+                        "github_branches, github_commits, github_issues(+get/create), github_comment, " +
+                        "github_pulls(+get), github_create_pull, github_actions_status, github_create_repo.",
+                )
+                appendLine(
+                    "When the user references an issue or PR number (\"fix issue #42\"), fetch it with " +
+                        "github_get_issue first. Push the feature branch BEFORE calling github_create_pull; " +
+                        "reference the originating issue in the PR body as \"Fixes #42\".",
+                )
+                appendLine(
+                    "Cloning/pushing private GitHub repos uses the signed-in token automatically — " +
+                        "git_clone/git_push need no extra setup. NEVER ask for or repeat tokens/API keys; " +
+                        "they are managed outside this conversation and you have no access to them.",
+                )
+            } else {
+                appendLine()
+                appendLine(
+                    "GITHUB tools are present but dormant: the user is not signed in. If a task clearly " +
+                        "needs issues/PRs/repo creation, say they can sign in from the Hub tab. Public " +
+                        "repos still clone fine with git_clone.",
+                )
             }
+        }
+    }
+
+    /**
+     * Blocks shared by every mode: active skills + the user's own instructions
+     * (Custom instructions in Settings).
+     */
+    private fun StringBuilder.appendPromptExtras(settings: AppSettings) {
+        if (settings.customInstructions.isNotBlank()) {
+            appendLine()
+            appendLine("USER INSTRUCTIONS:")
+            appendLine(settings.customInstructions.trim())
+        }
+        skills.renderPromptBlock(settings.enabledSkills)?.let { block ->
+            appendLine()
+            appendLine(block)
         }
     }
 
@@ -706,5 +885,15 @@ class AgentEngine(
         const val SESSION_DIR = ".opencode"
         const val SESSION_FILE = "session.json"
         const val MAX_TOOL_RESULT_CHARS = 30_000
+        const val MAX_PROGRESS_LINES = 6
+        const val REVIEW_BAR_FILES = 8
+
+        /** Mutating tools whose success means one more file (or path) changed. */
+        val WRITE_COUNTING_TOOLS = setOf(
+            WriteFileTool.name,
+            EditFileTool.name,
+            DeletePathTool.name,
+            CreateDirectoryTool.name,
+        )
     }
 }

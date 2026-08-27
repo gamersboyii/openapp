@@ -59,7 +59,8 @@ Manual service locator, no DI framework. `AppContainer` in
 [OpenCodeApp.kt](app/src/main/java/dev/opencode/mobile/OpenCodeApp.kt) builds
 every app-lifetime singleton — `settings`, `workspace`, `git`, `snapshots`,
 `preview`, `commandHistory`, `terminal`, `builds`, `checkpoints`, `scope`,
-`agent` — and is handed to Compose through `LocalContainer` (a
+`github`, `editorTabs`, `agent` — and is handed to Compose through
+`LocalContainer` (a
 `staticCompositionLocalOf`). `bootstrap()` restores the last project and the
 command history, keeps the agent transcript, remembered path, and preview root
 in step with `workspace.activeProject`, and rebinds `checkpoints` to the active
@@ -77,7 +78,28 @@ ViewModels — screens hold local `remember` state and read the container.
 | Path | Role |
 | --- | --- |
 | `agent/AgentEngine.kt` (~700) | tool-calling loop, transcript, approval gate, session persistence, pre-turn checkpoint + turn review |
-| `agent/Tools.kt` (~680) | 24 `AgentTool` objects + `ToolRegistry` |
+| `agent/Tools.kt` | ~39 `AgentTool` objects + `ToolRegistry` |
+| `agent/GithubTools.kt` | 15 GitHub tools (feature 8); read tools ungated,
+  create/comment/PR gated like other writes |
+| `core/github/GitHubClient.kt` | REST v3 over the shared OkHttp client;
+  token attached here only, errors redacted |
+| `core/github/GitHubSession.kt` | token→client StateFlow, `/user` verify,
+  OAuth device flow polling (`authorization_pending` loop) |
+| `bg/AgentForegroundService.kt` | dataSync foreground service mirroring
+  engine.isRunning/status/progress/paused into a notification; self-stops
+  when idle |
+| `core/editor/CodeAssist.kt` | pure-Kotlin editor brain: bracket matching,
+  auto-insert/skip-over, smart indent, word completer, symbol outline,
+  whole-word rename, coalescing EditorHistory |
+| `core/editor/EditorTabsStore.kt` | app-scoped open-file tabs with cached
+  unsaved buffers (memory-only by design) |
+| `agent/SkillTool.kt` | `use_skill` tool — loads a bundled SKILL.md on demand;
+  the only tool that stays available in Chat Only mode |
+| `core/instructions/InstructionStore.kt` | bundled INSTRUCTION.md system prompt;
+  copied to `filesDir/instructions/` so Settings can edit/reset it; exposes
+  text + modified StateFlows, 32k-char prompt cap |
+| `core/skills/SkillStore.kt` | parses `assets/skills/index.json` catalog, caches
+  bodies, renders the ACTIVE SKILLS prompt block for enabled ids |
 | `agent/Tool.kt` (~120) | `AgentTool`/`ToolContext` contracts, JSON arg + schema helpers, dynamic `needsApproval` |
 | `agent/Templates.kt` (538) | 6 zero-build project templates |
 | `core/fs/WorkspaceManager.kt` (317) | sandboxed file ops, search, zip export |
@@ -95,13 +117,25 @@ ViewModels — screens hold local `remember` state and read the container.
 | `core/util/Highlighter.kt` (177) | regex syntax highlighting |
 | `core/util/TextDiff.kt` (164) | LCS line diff — rows, hunks with context, add/remove stat |
 | `llm/` (5 files) | provider registry, 3 wire protocols, SSE reader |
-| `ui/` (13 files) | Compose screens (incl. terminal, review, checkpoints) + theme + shared components |
+| `ui/` (15 files) | Compose screens (incl. terminal, review, checkpoints,
+  skills) + theme + shared components |
 
 ### Agent loop
 
 [AgentEngine.kt](app/src/main/java/dev/opencode/mobile/agent/AgentEngine.kt):
 stream one assistant turn, run any tool calls, feed results back, repeat until
 the model stops calling tools or `settings.maxSteps` (default 24) is hit.
+
+- Tool provisioning: `availableToolSpecs()` returns the full registry in Build
+  mode; Chat Only mode (`settings.chatOnly`) offers only `use_skill`, and
+  `executeCall` additionally DENIES any other tool the model still attempts.
+- System prompt assembly (`buildSystemPrompt`): chat-only gets a short
+  conversational prompt. Build mode stacks, in order: bundled INSTRUCTION.md
+  handbook (iff `settings.useSystemPrompt`, capped at 32k chars) → device
+  execution facts → project/approval state → user instructions + ACTIVE SKILLS
+  block (`appendPromptExtras`) → GitHub state. Enabled skills contribute one
+  description line each; full text flows through `use_skill` (whose results use
+  a raised per-call cap of ~62k chars).
 
 - `entries: StateFlow<List<ChatEntry>>` drives the UI; `history` holds the raw
   `ChatMessage` list sent to the model.
@@ -122,8 +156,21 @@ the model stops calling tools or `settings.maxSteps` (default 24) is hit.
   (`checkpointId`, label, fileCount, added, removed). `undoTurn()` restores the
   checkpoint (files only — the transcript is kept, so a user turn is never
   silently destroyed); `acceptReview()` just clears the review.
+- `ToolContext` carries `github: GitHubSession`; tools call
+  `context.requireGithub()` which throws a model-directed hint when signed
+  out. Clone/push/pull use `settings.effectiveGitCredentials` (explicit git
+  token first, signed-in GitHub token second).
+- System prompt gains a GITHUB block: tool list, "Fixes #42" workflow,
+  push-before-create_pull ordering, and a hard never-touch-tokens rule.
+- Background-mode controls live on the engine: pause()/resume() gate at step
+  boundaries via awaitIfPaused(); cancel() also clears paused. progress:
+  StateFlow<List<String>> is a bounded ✓/✗ feed for the notification;
+  turnFilesChanged counts successful write/edit/delete per turn; lastPrompt
+  powers retryLastTurn(). TurnReview now embeds TurnFileStat rows for the
+  review bar's per-file list (top 8 by churn).
 - Reads (`list_files`, `read_file`, `search_code`, `project_info`, `git_status`,
-  `git_diff`, `git_log`, `preview`, `dev_server_status`) are not gated. Mutating:
+  `git_diff`, `git_log`, `preview`, `dev_server_status`, all `github_*` reads)
+  are not gated. Mutating:
   `write_file`, `edit_file`, `delete_path`, `create_directory`, `create_project`,
   `git_clone`, `fetch_repo_snapshot`, `git_init`, `git_commit`, `git_push`,
   `git_pull`.
@@ -163,8 +210,14 @@ checkpoints must survive an app restart and work in a project that has no `.git`
   the `(old, new)` text pair a `DiffFileCard` expands lazily.
 
 The review flow (feature: AI change review) is a whole-turn undo layered on this:
-the pre-turn checkpoint is the baseline, so "Undo turn", per-file "Revert", and
-"Keep" all read from the same snapshot. Undo reverts files only — chat stays.
+the pre-turn checkpoint is the baseline, so "Undo turn", per-file "Revert",
+hunk-level accept/reject, and "Keep" all read from the same snapshot. Hunk
+rejection is `CheckpointService.revertHunks(project, id, path,
+rejectedIndices)`: it recomputes TextDiff.hunks(baseline, live) — indices
+must match what DiffFileCard rendered — and splices each rejected hunk's old
+lines back over its new window. All index math coerces before sublist()
+(pure-add hunks have no old-side window). Rename/deleteAll round out the
+service without touching manifests' blob GC assumptions.
 
 ### Terminal & build
 

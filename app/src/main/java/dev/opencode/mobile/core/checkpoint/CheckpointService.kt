@@ -159,6 +159,65 @@ class CheckpointService {
         runCatching { blob.copyTo(target, overwrite = true) }.isSuccess
     }
 
+    /**
+     * Feature 10 — hunk-level accept/reject. Re-applies the listed hunk indices
+     * from the pre-turn baseline into the live file: a rejected hunk restores
+     * its old lines while everything else keeps the agent's version. Hunks are
+     * those returned by [TextDiff.hunks] for (baseline text, live text), in order.
+     */
+    suspend fun revertHunks(
+        project: Project,
+        id: Long,
+        path: String,
+        rejectedIndices: List<Int>,
+    ): Boolean = withContext(Dispatchers.IO) {
+        if (rejectedIndices.isEmpty()) return@withContext false
+        val root = project.dir
+        val entry = readManifest(root, id)?.firstOrNull { it.path == path } ?: return@withContext false
+        val oldText = blobText(root, entry.sha) ?: return@withContext false
+        val newText = readTextOrNull(File(root, path)) ?: return@withContext false
+
+        val hunks = TextDiff.hunks(oldText, newText)
+        if (hunks.isEmpty() || rejectedIndices.any { it < 0 || it >= hunks.size }) {
+            return@withContext false
+        }
+
+        val rejectSet = rejectedIndices.toSortedSet()
+        val oldLines = oldText.split('\n')
+        val newLines = newText.split('\n')
+        val out = ArrayList<String>(newLines.size + oldLines.size)
+
+        var cursor = 0 // 0-based index into newLines of what has been emitted so far
+        hunks.forEachIndexed { index, hunk ->
+            // Line numbers in Row are 1-based; find this hunk's window on each side.
+            val newStart = ((hunk.rows.firstOrNull { it.newLine > 0 }?.newLine ?: (cursor + 1)) - 1)
+                .coerceIn(0, newLines.size)
+            val oldStart = (hunk.rows.firstOrNull { it.oldLine > 0 }?.oldLine ?: (newStart + 1))
+                .coerceIn(0, oldLines.size)
+            val oldCount = hunk.rows.count { it.kind != TextDiff.Kind.ADD }
+            val newCount = hunk.rows.count { it.kind != TextDiff.Kind.REMOVE }
+            val newFrom = cursor.coerceIn(0, newLines.size)
+            val newTo = (newStart + newCount).coerceIn(newFrom, newLines.size)
+
+            if (index in rejectSet) {
+                // Keep live lines before the hunk, then splice the baseline segment.
+                out.addAll(newLines.subList(newFrom, newStart.coerceIn(newFrom, newTo)))
+                out.addAll(
+                    oldLines.subList(oldStart, (oldStart + oldCount).coerceIn(oldStart, oldLines.size)),
+                )
+            } else {
+                out.addAll(newLines.subList(newFrom, newTo))
+            }
+            cursor = newTo
+        }
+        if (cursor < newLines.size) out.addAll(newLines.subList(cursor, newLines.size))
+
+        runCatching {
+            File(root, path).parentFile?.mkdirs()
+            File(root, path).writeText(out.joinToString("\n"))
+        }.isSuccess
+    }
+
     suspend fun delete(project: Project, id: Long) = withContext(Dispatchers.IO) {
         val root = project.dir
         var index = readIndex(root)
@@ -169,6 +228,36 @@ class CheckpointService {
         writeIndex(root, index)
         publish(root, index)
     }
+
+    /** Deletes every checkpoint for the project; files on disk are untouched. */
+    suspend fun deleteAll(project: Project) = withContext(Dispatchers.IO) {
+        val root = project.dir
+        val index = readIndex(root)
+        if (index.items.isEmpty()) return@withContext
+        index.items.forEach { manifestFile(root, it.id).delete() }
+        blobsDir(root).deleteRecursively()
+        baseDir(root).mkdirs()
+        blobsDir(root).mkdirs()
+        val empty = CheckpointIndex(nextId = index.nextId)
+        writeIndex(root, empty)
+        publish(root, empty)
+    }
+
+    /** Feature 11: renames a checkpoint without touching its manifest. */
+    suspend fun rename(project: Project, id: Long, label: String): Boolean =
+        withContext(Dispatchers.IO) {
+            val root = project.dir
+            val clean = label.trim().take(80)
+            if (clean.isEmpty()) return@withContext false
+            var index = readIndex(root)
+            val target = index.items.firstOrNull { it.id == id } ?: return@withContext false
+            index = index.copy(
+                items = index.items.map { if (it.id == id) target.copy(label = clean) else it },
+            )
+            writeIndex(root, index)
+            publish(root, index)
+            true
+        }
 
     /** Changes between checkpoint [id] and the live working tree. */
     suspend fun diff(project: Project, id: Long): List<FileChange> = withContext(Dispatchers.IO) {

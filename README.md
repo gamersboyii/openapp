@@ -164,13 +164,155 @@ OpenAI `/chat/completions`, Anthropic Messages, and Gemini
 `create_directory` · `search_code` · `create_project` · `project_info` ·
 `git_clone` · `fetch_repo_snapshot` · `git_status` · `git_init` · `git_commit` ·
 `git_diff` · `git_log` · `git_push` · `git_pull` · `preview` ·
-`dev_server_start` · `dev_server_stop` · `dev_server_status`
+`dev_server_start` · `dev_server_stop` · `dev_server_status` ·
+`github_account` · `github_repos` · `github_repo_info` ·
+`github_create_repo` · `github_branches` · `github_commits` ·
+`github_issues` · `github_get_issue` · `github_create_issue` ·
+`github_comment` · `github_pulls` · `github_get_pull` ·
+`github_create_pull` · `github_actions_status`
 
 Every call is gated on an in-chat approve/deny prompt, and the loop has a
 `maxSteps` backstop so a confused model cannot spin forever. Session history is
 persisted to `<project>/.opencode/session.json`.
 
 ---
+
+---
+
+## GitHub integration (feature 8)
+
+The **Hub tab** signs you in and covers the read side of GitHub without a
+server in between:
+
+- **Sign-in** - a personal access token, or the OAuth **device flow** against
+  your own OAuth app's client id (no client secret ships in the APK); verified
+  against `/user`.
+- **Repository browsing & creation** - your accessible repos newest-first,
+  create repos where your token permits, per-repo contents browser.
+- **Branches / commits / issues / PRs / Actions** - open/closed filters,
+  issue and pull-request detail with comment threads and, on PRs, review
+  decisions.
+- **Clone** - one tap lands the repo as a local project and switches the agent
+  to it. Private repos work everywhere because cloning/pushing/pulling fall
+  back to the signed-in token when no explicit git token is configured.
+
+The fifteen `github_*` agent tools let the model do all of this on your behalf,
+so the flagship workflow runs end-to-end from chat:
+
+> "Fix issue #42 and open a PR"
+
+fetch issue -> inspect repository -> modify code -> run tests -> commit ->
+push branch -> create PR (`Fixes #42`).
+
+### Token safety
+
+Tokens live in EncryptedSharedPreferences next to every other secret. They are
+attached to requests inside `GitHubClient` only - never placed in exceptions,
+logs, tool results or model context - and user-facing error strings pass
+through a redaction filter (`redactSecrets`) that masks anything shaped like a
+GitHub credential as defense in depth. The system prompt additionally forbids
+the model from asking for tokens; it has no way to read them.
+
+---
+
+## Advanced code editor (feature 9)
+
+Still one `BasicTextField`, but now editor-grade:
+
+- **File tabs** with unsaved dots; buffers survive leaving the screen, and
+  closing a dirty tab keeps its text cached until you reopen it.
+- **Undo / redo** with keystroke coalescing; structural breaks on newline,
+  paste and programmatic replacements.
+- **Find / replace** with match highlighting in the buffer, x/y counter,
+  next/prev, replace current/all, case toggle.
+- **Autocomplete** - instant word completions from document + language
+  keywords; no LLM round-trip.
+- **Smart indent** on Enter (inherit indentation, open one level after `{`,
+  `[`, `(` or a trailing `:`).
+- **Brackets** - auto-close pairs, skip over duplicate closers and quotes,
+  live match highlight at the caret, unbalanced-bracket diagnostic.
+- **Symbols** - outline sheet with tap-to-jump, go-to-line, go-to-definition
+  within the file, whole-word rename dialog.
+- **Diff view** of buffer vs saved copy, rendered as colored hunks.
+- **Large-file handling** - past 60k chars autocomplete/pairing/bracket UI
+  drop into "lite" mode; past 120k the highlighter switches off too.
+
+Honest limitation: true multi-cursor editing requires a custom text engine
+that Compose's text field cannot express - that item is deliberately not faked.
+
+---
+
+## Change review & checkpoints (features 10-11)
+
+After an agent turn changes files, a bar in chat shows *N files changed* with a
+per-file `path +adds -dels` list and three actions: **Review Changes**,
+**Reject** (revert everything) and **Accept**, plus *undo entire agent turn*.
+Inside the review screen each file can be reverted alone, and hunks can be
+accepted/rejected individually: tap the `@@` headers to mark them, apply, and
+only those regions are restored from the pre-turn checkpoint.
+
+Checkpoints remain content-addressed, survive app restarts and work without a
+`.git` directory. New in this round: rename a checkpoint and delete the whole
+history with one confirmation.
+
+---
+
+## Background agent mode (feature 12)
+
+While a turn runs, the composer offers a *continue in background* action that
+starts a `dataSync` foreground service. The notification mirrors progress
+(analysed project... modified N files... build failed -> fixing), with pause /
+resume / stop actions riding along, Retry after failures (re-sends the last
+prompt), and a pointer back into the app when approval is needed. The service
+stops itself the moment the engine is idle, so nothing lingers.
+
+---
+
+## System prompt handbook (feature 13)
+
+Every build-mode turn is prefixed with the bundled **`INSTRUCTION.md`** agent
+handbook (`assets/INSTRUCTION.md`): 25 sections covering inspect-before-edit,
+minimal-change defaults, Android-first rules, approval models, trust boundaries
+against prompt injection, verification discipline and completion criteria.
+
+- The file is copied to app-private storage on first launch so it can be edited
+  in **Settings → System prompt → Edit**; **Reset** restores the bundled copy.
+- **Use agent handbook** (default on) switches the prefix off entirely for
+  minimal prompts. A hard cap keeps the handbook from exceeding ~32k characters.
+- The handbook defines *behaviour*; the device-facts block that follows it
+  defines the *actual on-phone capabilities* — where they disagree, device facts win.
+
+## Built-in skills (feature 14)
+
+The app ships a curated skill library under `assets/skills/` — each skill is an
+agent-skills-convention `SKILL.md`. Enabled skills add one description line to
+every system prompt; full bodies load on demand through the `use_skill` tool,
+so token cost stays proportional to what the agent actually uses.
+
+| Category | Skills |
+|---|---|
+| Design | Taste — Anti-Slop Frontend, Frontend Design (anthropics), UI/UX Pro Max |
+| Communication | Caveman Mode (~65% output-token cut) |
+| Engineering Process | Superpowers: overview router, brainstorming, systematic debugging, TDD, writing/executing plans, requesting/receiving review, verification-before-completion, subagent-driven development |
+| Code Minimalism | Ponytail: lazy-senior-dev core + audit / debt / gain / review |
+| Memory | Import Memory from Another Assistant — pastes a ChatGPT/Gemini export, privacy-filters it, confirms the plan, then files it into additive `memory/` files |
+
+Manage them in **Settings → Skills** or the ✦ button in the chat top bar:
+search, category filters, per-skill toggles, and a detail sheet rendering the
+full SKILL.md. Skill availability survives app restarts (encrypted settings).
+
+## Chat Only mode & project creation
+
+The composer has a **Build ⇄ Chat Only** segmented switch:
+
+- **Chat Only** strips every project tool from the model for pure conversation;
+  only `use_skill` remains available (style skills keep working). The engine
+  additionally refuses any tool call the model still attempts, with a hint to
+  flip back to Build.
+- **Build** is the full agent. Asking "make me a to-do app" with no project open
+  triggers `create_project` from one of six zero-build templates
+  (blank/static/tailwind/react/vue/landing) and the agent keeps editing until it
+  works, then hands you the live preview.
 
 ## Security notes
 
@@ -205,8 +347,15 @@ reading them, not reflexively.
 
 ```
 app/src/main/java/dev/opencode/mobile/
-  agent/     tool-calling loop, tool implementations, project templates
+  agent/     tool-calling loop, tool implementations (incl. github_*, use_skill), templates
+  bg/        AgentForegroundService - background agent mode
   core/fs/   WorkspaceManager — sandboxed file ops, search, zip export
+  core/editor/  CodeAssist (brackets, indent, completions, symbols, undo)
+                + EditorTabsStore — file tabs & unsaved buffers
+  core/github/  GitHub REST client + device-flow auth session
+  core/instructions/  InstructionStore — bundled INSTRUCTION.md system prompt,
+                user-editable in Settings
+  core/skills/  SkillStore — built-in skill library from assets/skills
   core/checkpoint/  content-addressed project snapshots (checkpoints + review)
   core/build/  project-type detection + build/test/run/clean recipes
   core/devserver/  Node dev-server host + on-device runtime probe
@@ -216,7 +365,15 @@ app/src/main/java/dev/opencode/mobile/
   core/util/ syntax Highlighter, TextDiff
   llm/       provider registry, three wire protocols, SSE streaming
   ui/        Compose screens: chat, projects, files, editor, preview, settings,
-             terminal, review, checkpoints
+             terminal, review, checkpoints, hub (GitHub), skills
+```
+
+Assets:
+```
+app/src/main/assets/
+  INSTRUCTION.md      agent handbook prefixed to every build-mode turn
+  skills/index.json   catalog of bundled skills
+  skills/<id>/SKILL.md one folder per skill (agent-skills convention)
 ```
 
 Dependencies are wired by hand through an `AppContainer` service locator exposed
@@ -233,3 +390,7 @@ that can only be verified in CI.
 - Text files only in the editor, with a size cap; the highlighter turns itself
   off past 120k characters.
 - Debug-signed APK. Not Play-Store-ready; no release signing config.
+- Multi-cursor editing is not supported (see feature 9 notes).
+- The background service runs only while an agent turn is active; when the
+  system refuses a backgrounded foreground-start, the turn continues at
+  normal priority instead of failing.

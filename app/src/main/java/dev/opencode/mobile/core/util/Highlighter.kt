@@ -74,6 +74,16 @@ object Highlighter {
     fun highlightFile(fileName: String, code: String): AnnotatedString =
         highlight(code, languageFor(fileName))
 
+    /** Keyword set for the language — reused by the editor's word completer. */
+    fun keywordsFor(fileName: String): Set<String> = when (languageFor(fileName)) {
+        Language.WEB_MARKUP -> emptySet()
+        Language.STYLES -> CSS_KEYWORDS
+        Language.C_LIKE -> C_FAMILY
+        Language.PYTHON -> PYTHON
+        Language.DATA -> setOf("true", "false", "null", "yes", "no")
+        Language.PLAIN -> emptySet()
+    }
+
     // Group 1 comment, 2 string, 3 number, 4 word.
     private val CODE_PATTERN = Regex(
         """(//[^\n]*|/\*[\s\S]*?\*/|#[^\n]*)""" +

@@ -3,18 +3,23 @@ package dev.opencode.mobile
 import android.app.Application
 import androidx.compose.runtime.staticCompositionLocalOf
 import dev.opencode.mobile.agent.AgentEngine
+import dev.opencode.mobile.agent.UseSkillTool
 import dev.opencode.mobile.core.build.BuildSystem
 import dev.opencode.mobile.core.checkpoint.CheckpointService
 import dev.opencode.mobile.core.devserver.DevServerManager
 import dev.opencode.mobile.core.devserver.NodeRuntime
+import dev.opencode.mobile.core.editor.EditorTabsStore
 import dev.opencode.mobile.core.exec.CommandHistoryStore
 import dev.opencode.mobile.core.exec.TerminalService
 import dev.opencode.mobile.core.fs.WorkspaceManager
 import dev.opencode.mobile.core.git.AndroidSystemReader
 import dev.opencode.mobile.core.git.GitService
 import dev.opencode.mobile.core.git.RepoSnapshotService
+import dev.opencode.mobile.core.github.GitHubSession
+import dev.opencode.mobile.core.instructions.InstructionStore
 import dev.opencode.mobile.core.preview.PreviewServer
 import dev.opencode.mobile.core.settings.SettingsStore
+import dev.opencode.mobile.core.skills.SkillStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -42,6 +47,23 @@ class AppContainer(application: Application) {
     val nodeRuntime = NodeRuntime(application, terminal)
     val devServer = DevServerManager(terminal, builds, nodeRuntime, scope)
 
+    // Feature 8: GitHub account state lives for the whole app lifetime and is
+    // observed by both the Hub tab and the agent's github_* tools.
+    val github = GitHubSession(settings, scope)
+
+    // Feature 9: open editor buffers (unsaved state) survive screen navigation.
+    val editorTabs = EditorTabsStore()
+
+    // System prompt handbook (bundled INSTRUCTION.md, editable in Settings) and
+    // the built-in skill library shipped in assets/skills.
+    val instructions = InstructionStore.create(application)
+    val skills = SkillStore(application)
+
+    init {
+        // The use_skill tool needs the library to describe its ids.
+        UseSkillTool.bind(skills)
+    }
+
     val agent = AgentEngine(
         workspace = workspace,
         git = git,
@@ -53,12 +75,18 @@ class AppContainer(application: Application) {
         devServer = devServer,
         commandHistory = commandHistory,
         settingsStore = settings,
+        github = github,
+        skills = skills,
+        instructions = instructions,
         scope = scope,
     )
 
     fun bootstrap() {
         scope.launch {
             commandHistory.load()
+            // Preload before the first turn so prompts/specs see the catalog.
+            instructions.load()
+            skills.all()
             workspace.refresh()
             settings.settings.value.lastProjectPath?.let { workspace.selectByPath(it) }
         }

@@ -20,6 +20,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.AddCircle
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.DeleteSweep
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.History
@@ -78,6 +80,8 @@ fun CheckpointsScreen(onBack: () -> Unit) {
     val snackbar = remember { SnackbarHostState() }
     var restoreTarget by remember { mutableStateOf<Checkpoint?>(null) }
     var deleteTarget by remember { mutableStateOf<Checkpoint?>(null) }
+    var renameTarget by remember { mutableStateOf<Checkpoint?>(null) }
+    var confirmClearAll by remember { mutableStateOf(false) }
 
     val activeProject = project
 
@@ -88,6 +92,15 @@ fun CheckpointsScreen(onBack: () -> Unit) {
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                    }
+                },
+                actions = {
+                    // Feature 11: drop the whole history in one go.
+                    IconButton(
+                        onClick = { confirmClearAll = true },
+                        enabled = items.isNotEmpty(),
+                    ) {
+                        Icon(Icons.Filled.DeleteSweep, contentDescription = "Delete all checkpoints")
                     }
                 },
             )
@@ -140,6 +153,7 @@ fun CheckpointsScreen(onBack: () -> Unit) {
                     olderId = items.getOrNull(index + 1)?.id,
                     onRestore = { restoreTarget = checkpoint },
                     onDelete = { deleteTarget = checkpoint },
+                    onRename = { renameTarget = checkpoint },
                 )
             }
         }
@@ -191,9 +205,69 @@ fun CheckpointsScreen(onBack: () -> Unit) {
                             snackbar.showSnackbar("Deleted ${toDelete.label}.")
                         }
                     }
-                }) { Text("Delete") }
+                }) { Text("Delete", color = MaterialTheme.colorScheme.error) }
             },
             dismissButton = { TextButton(onClick = { deleteTarget = null }) { Text("Cancel") } },
+        )
+    }
+
+    val toRename = renameTarget
+    if (toRename != null) {
+        var nameText by remember(toRename.id) { mutableStateOf(toRename.label) }
+        AlertDialog(
+            onDismissRequest = { renameTarget = null },
+            title = { Text("Rename checkpoint") },
+            text = {
+                OutlinedTextField(
+                    value = nameText,
+                    onValueChange = { nameText = it.take(80) },
+                    singleLine = true,
+                    label = { Text("Label") },
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = nameText.isNotBlank(),
+                    onClick = {
+                        renameTarget = null
+                        if (activeProject != null) {
+                            container.scope.launch {
+                                checkpoints.rename(activeProject, toRename.id, nameText)
+                            }
+                        }
+                    },
+                ) { Text("Save") }
+            },
+            dismissButton = { TextButton(onClick = { renameTarget = null }) { Text("Cancel") } },
+        )
+    }
+
+    if (confirmClearAll) {
+        AlertDialog(
+            onDismissRequest = { confirmClearAll = false },
+            title = { Text("Delete all checkpoints?") },
+            text = {
+                Text(
+                    "Every snapshot for this project is removed and its storage is freed. " +
+                        "Files on disk are not touched.",
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        confirmClearAll = false
+                        if (activeProject != null) {
+                            container.scope.launch {
+                                checkpoints.deleteAll(activeProject)
+                                snackbar.showSnackbar("Checkpoint history cleared.")
+                            }
+                        }
+                    },
+                ) { Text("Delete all", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmClearAll = false }) { Text("Cancel") }
+            },
         )
     }
 }
@@ -205,6 +279,7 @@ private fun CheckpointCard(
     olderId: Long?,
     onRestore: () -> Unit,
     onDelete: () -> Unit,
+    onRename: () -> Unit = {},
 ) {
     val container = LocalContainer.current
     val checkpoints = container.checkpoints
@@ -235,6 +310,9 @@ private fun CheckpointCard(
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
+                }
+                IconButton(onClick = onRename) {
+                    Icon(Icons.Filled.Edit, contentDescription = "Rename", tint = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 IconButton(onClick = onRestore) {
                     Icon(Icons.Filled.Restore, contentDescription = "Restore", tint = MaterialTheme.colorScheme.primary)
