@@ -77,7 +77,11 @@ ViewModels — screens hold local `remember` state and read the container.
 
 | Path | Role |
 | --- | --- |
-| `agent/AgentEngine.kt` (~700) | tool-calling loop, transcript, approval gate, session persistence, pre-turn checkpoint + turn review |
+| `agent/AgentEngine.kt` (~1100) | tool-calling loop, transcript, approval gate,
+  multi-session persistence (`<root>/.opencode/sessions/` + index.json, with a
+  `chat-sessions/` fallback when no project is open and a one-time import of
+  the legacy `session.json`), message queueing while a turn runs, wire-history
+  compaction, fast-mode prompt, pre-turn checkpoint + turn review |
 | `agent/Tools.kt` | ~39 `AgentTool` objects + `ToolRegistry` |
 | `agent/GithubTools.kt` | 15 GitHub tools (feature 8); read tools ungated,
   create/comment/PR gated like other writes |
@@ -117,8 +121,8 @@ ViewModels — screens hold local `remember` state and read the container.
 | `core/util/Highlighter.kt` (177) | regex syntax highlighting |
 | `core/util/TextDiff.kt` (164) | LCS line diff — rows, hunks with context, add/remove stat |
 | `llm/` (5 files) | provider registry, 3 wire protocols, SSE reader |
-| `ui/` (15 files) | Compose screens (incl. terminal, review, checkpoints,
-  skills) + theme + shared components |
+| `ui/` (16 files) | Compose screens (incl. terminal, review, checkpoints,
+  sessions, hub (GitHub), skills) + theme + shared components |
 
 ### Agent loop
 
@@ -127,18 +131,23 @@ stream one assistant turn, run any tool calls, feed results back, repeat until
 the model stops calling tools or `settings.maxSteps` (default 24) is hit.
 
 - Tool provisioning: `availableToolSpecs()` returns the full registry in Build
-  mode; Chat Only mode (`settings.chatOnly`) offers only `use_skill`, and
-  `executeCall` additionally DENIES any other tool the model still attempts.
+  mode minus the 15 `github_*` tools while signed out (they would only burn
+  prompt tokens); Chat Only mode (`settings.chatOnly`) offers only `use_skill`,
+  and `executeCall` additionally DENIES any other tool the model still attempts.
 - System prompt assembly (`buildSystemPrompt`): chat-only gets a short
-  conversational prompt. Build mode stacks, in order: bundled INSTRUCTION.md
-  handbook (iff `settings.useSystemPrompt`, capped at 32k chars) → device
-  execution facts → project/approval state → user instructions + ACTIVE SKILLS
-  block (`appendPromptExtras`) → GitHub state. Enabled skills contribute one
-  description line each; full text flows through `use_skill` (whose results use
-  a raised per-call cap of ~62k chars).
+  conversational prompt. Build mode: with `settings.fastMode` (default on) a
+  condensed `FAST_MODE_BRIEFING` replaces handbook + device facts; otherwise the
+  bundled INSTRUCTION.md handbook (iff `settings.useSystemPrompt`, capped at 32k
+  chars) → device execution facts. Then project/approval state → user
+  instructions + ACTIVE SKILLS block (`appendPromptExtras`) → GitHub state.
+  Enabled skills contribute one description line each; full text flows through
+  `use_skill` (whose results use a raised per-call cap of ~62k chars).
 
 - `entries: StateFlow<List<ChatEntry>>` drives the UI; `history` holds the raw
-  `ChatMessage` list sent to the model.
+  `ChatMessage` list sent to the model. `wireHistory()` compacts tool results
+  older than the last 4 calls to ~900 chars — on the wire only; the on-disk
+  transcript keeps full text. Streaming text patches are coalesced to ~50 ms
+  (`STREAM_PATCH_INTERVAL_NANOS`) with a single final flush.
 - Approval: tools decide per call via `needsApproval(args, settings)` — default
   is `mutating && !settings.autoApproveWrites`; `run_command` and
   `build_project` override it with the CommandPolicy verdict and
@@ -146,8 +155,15 @@ the model stops calling tools or `settings.maxSteps` (default 24) is hit.
   `CompletableDeferred<Boolean>` exposed as
   `pendingApproval: StateFlow<ApprovalRequest?>`; the UI calls
   `respondToApproval(Boolean)`.
-- Session is persisted to `<project>/.opencode/session.json`
-  (`SESSION_DIR`/`SESSION_FILE` constants).
+- Sessions: multi-session store under `<root>/.opencode/sessions/` (`<id>.json`
+  per chat + `index.json` catalog; root is `chat-sessions/` under filesDir when
+  no project is open). `sessions`/`activeSessionId` StateFlows drive the
+  Sessions screen; `newSession()/switchTo()/deleteSession()/renameSession()`
+  manage them; `send()` while a turn runs shows the message immediately and
+  queues it for the turn's `finally`. The legacy single `session.json` is
+  imported once on bind. A mid-turn project switch (create_project) re-roots
+  BEFORE `selectByPath` so the follow-up `bindProject` no-ops and the running
+  transcript continues as its own session in the new project.
 - Checkpoint/review: `maybeCheckpoint(tool, settings)` fires once per turn,
   before the first mutating / `run_command` / `build_project` tool, iff
   `settings.autoCheckpoint`; it captures with `retain = settings.maxCheckpoints`.

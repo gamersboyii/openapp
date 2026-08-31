@@ -172,8 +172,22 @@ OpenAI `/chat/completions`, Anthropic Messages, and Gemini
 `github_create_pull` · `github_actions_status`
 
 Every call is gated on an in-chat approve/deny prompt, and the loop has a
-`maxSteps` backstop so a confused model cannot spin forever. Session history is
-persisted to `<project>/.opencode/session.json`.
+`maxSteps` backstop so a confused model cannot spin forever. **Chat sessions
+are multi-session:** every conversation is saved under
+`<project>/.opencode/sessions/<id>.json` with an `index.json` catalog, and the
+**Sessions** screen (drawer or the ⏱ button in the chat top bar) lists them all
+— reopen, rename, delete, or start a new one; "New chat" archives the current
+one instead of destroying it. With no project open, sessions live under the
+app's private `chat-sessions/` directory, so Chat Only conversations persist
+too. A pre-multi-session `session.json` is imported automatically on first run.
+Messages typed while a turn is running are shown immediately and queued; they
+send the moment the turn ends — nothing gets dropped.
+
+**Fast mode** (Settings → Performance, on by default) makes requests reach the
+provider — and the first token arrive — much sooner: a condensed system prompt
+instead of the ~23 KB handbook, `github_*` tool specs withheld while signed
+out, and stale tool results compacted after the last 4 calls. Streaming text
+patches are coalesced at ~50 ms so long chats stay smooth.
 
 ---
 

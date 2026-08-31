@@ -23,6 +23,7 @@ import dev.opencode.mobile.llm.ProviderRegistry
 import dev.opencode.mobile.llm.Role
 import dev.opencode.mobile.llm.ToolCall
 import dev.opencode.mobile.llm.ToolResult
+import dev.opencode.mobile.llm.ToolSpec
 import java.io.File
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
@@ -87,10 +88,48 @@ data class TurnReview(
 /** One row of "App.kt  +42 -18" on the review bar. */
 data class TurnFileStat(val path: String, val type: String, val added: Int, val removed: Int)
 
+/** One row of the Sessions screen. Lightweight — the full transcript stays on disk. */
+data class SessionMeta(
+    val id: String,
+    val title: String,
+    val createdAt: Long,
+    val updatedAt: Long,
+    val messageCount: Int,
+    val preview: String,
+)
+
 @Serializable
 private data class SessionSnapshot(
     val entries: List<ChatEntry>,
     val history: List<ChatMessage>,
+)
+
+/** Full transcript of one chat session, persisted as `sessions/<id>.json`. */
+@Serializable
+private data class SessionFile(
+    val id: String,
+    val title: String,
+    val createdAt: Long,
+    val updatedAt: Long,
+    val entries: List<ChatEntry>,
+    val history: List<ChatMessage>,
+)
+
+@Serializable
+private data class SessionIndexEntry(
+    val id: String,
+    val title: String,
+    val createdAt: Long,
+    val updatedAt: Long,
+    val messageCount: Int = 0,
+    val preview: String = "",
+)
+
+/** `sessions/index.json` — the cheap catalog the Sessions screen reads. */
+@Serializable
+private data class SessionIndex(
+    val activeId: String? = null,
+    val sessions: List<SessionIndexEntry> = emptyList(),
 )
 
 /**
@@ -115,6 +154,8 @@ class AgentEngine(
     private val github: GitHubSession,
     private val skills: SkillStore,
     private val instructions: InstructionStore,
+    /** Where sessions live when no project is open — general chats survive restarts too. */
+    private val fallbackSessionsRoot: File,
     private val scope: CoroutineScope,
 ) {
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true; prettyPrint = true }
@@ -155,7 +196,24 @@ class AgentEngine(
 
     private var approvalGate: CompletableDeferred<Boolean>? = null
     private var turnJob: Job? = null
-    private var sessionDir: File? = null
+
+    // ---- multi-session state -------------------------------------------------
+    // Sessions live under <root>/sessions/ where root is the project's .opencode
+    // dir, or [fallbackSessionsRoot] when no project is open. An index.json next
+    // to the session files is the cheap catalog the Sessions screen reads.
+    private var sessionRoot: File? = null
+    private var sessionId: String? = null
+    private var sessionTitle: String = ""
+    private var sessionCreatedAt: Long = 0L
+
+    private val _sessions = MutableStateFlow<List<SessionMeta>>(emptyList())
+    val sessions: StateFlow<List<SessionMeta>> = _sessions.asStateFlow()
+
+    private val _activeSessionId = MutableStateFlow<String?>(null)
+    val activeSessionId: StateFlow<String?> = _activeSessionId.asStateFlow()
+
+    /** Messages typed while a turn is running; they send the moment it finishes. */
+    private val pendingQueue = ArrayDeque<String>()
 
     // Snapshot taken before the first change of the current turn, and the project
     // it belongs to, so the post-turn diff and any undo target the right tree.
@@ -165,10 +223,23 @@ class AgentEngine(
 
     // ---- public API -------------------------------------------------------
 
+    /**
+     * Sends a user message. While a turn is running the text is shown immediately
+     * and queued — it goes to the provider the moment the current turn ends, so
+     * nothing typed mid-run is ever dropped.
+     */
     fun send(userText: String) {
-        if (_isRunning.value || userText.isBlank()) return
-        lastPrompt = userText.trim()
-        turnJob = scope.launch { runTurn(userText.trim()) }
+        val text = userText.trim()
+        if (text.isBlank()) return
+        if (_isRunning.value) {
+            appendEntry(ChatEntry(id = nextId++, kind = EntryKind.USER, text = text))
+            addNotice("Queued — it will send when this turn finishes.")
+            pendingQueue += text
+            scope.launch { persist() }
+            return
+        }
+        lastPrompt = text
+        turnJob = scope.launch { runTurn(text) }
     }
 
     fun cancel() {
@@ -234,31 +305,98 @@ class AgentEngine(
         }
     }
 
-    fun clear() {
+    /**
+     * Starts a fresh chat. The current transcript is saved into the session list
+     * first, so "New chat" never destroys history — it just starts a new file.
+     */
+    fun newSession() {
+        if (_isRunning.value) return
+        pendingQueue.clear()
         cancel()
-        history.clear()
-        _entries.value = emptyList()
-        _pendingReview.value = null
-        turnCheckpoint = null
-        turnProject = null
-        scope.launch { persist() }
+        val snapshot = SessionSnapshot(_entries.value, history.toList())
+        val savedId = sessionId
+        val savedTitle = sessionTitle
+        val savedCreated = sessionCreatedAt
+        resetTranscript()
+        if (savedId == null && snapshot.entries.isEmpty() && snapshot.history.isEmpty()) return
+        scope.launch {
+            persistCaptured(savedId, savedTitle, savedCreated, snapshot)
+            // The archived chat is no longer the open one — clear its active marker
+            // so a restart reopens nothing instead of the chat just archived.
+            writeIndex { it.copy(activeId = null) }
+        }
     }
 
-    /** Swaps the transcript when the active project changes. */
+    /**
+     * Replaces the open chat with a saved session. Returns false while a turn is
+     * running (switching mid-run would corrupt the wire transcript) or on a no-op.
+     */
+    fun switchTo(id: String): Boolean {
+        if (_isRunning.value || id == sessionId) return false
+        scope.launch {
+            persist()
+            if (restoreSession(id)) {
+                // Keep the index marker in step so a restart reopens this session.
+                writeIndex { it.copy(activeId = id) }
+            } else {
+                addNotice("That session could not be loaded.")
+            }
+        }
+        return true
+    }
+
+    /** Deletes a saved session; deleting the open chat resets to a fresh canvas. */
+    fun deleteSession(id: String) {
+        scope.launch {
+            withContext(Dispatchers.IO) {
+                runCatching { File(sessionsDir(), "$id.json").delete() }
+            }
+            removeFromIndex(id)
+            if (id == sessionId) resetTranscript()
+        }
+    }
+
+    /** Renames a saved session (index + file, so a restore keeps the name). */
+    fun renameSession(id: String, title: String) {
+        val name = title.trim().take(120)
+        if (name.isBlank()) return
+        if (id == sessionId) sessionTitle = name
+        scope.launch {
+            withContext(Dispatchers.IO) {
+                runCatching {
+                    val file = File(sessionsDir(), "$id.json")
+                    if (file.isFile) {
+                        val snap = json.decodeFromString(SessionFile.serializer(), file.readText())
+                        file.writeText(
+                            json.encodeToString(SessionFile.serializer(), snap.copy(title = name)),
+                        )
+                    }
+                }
+            }
+            writeIndex { current ->
+                current.copy(
+                    sessions = current.sessions.map { if (it.id == id) it.copy(title = name) else it },
+                )
+            }
+        }
+    }
+
+    /** Swaps the session space when the active project changes. */
     suspend fun bindProject(project: Project?) {
         _pendingReview.value = null
         turnCheckpoint = null
         turnProject = null
-        if (project == null) {
-            sessionDir = null
-            history.clear()
-            _entries.value = emptyList()
-            return
-        }
-        val dir = File(project.dir, SESSION_DIR)
-        if (sessionDir?.absolutePath == dir.absolutePath) return
-        sessionDir = dir
-        restore()
+        val root = if (project != null) File(project.dir, SESSION_DIR) else fallbackSessionsRoot
+        if (sessionRoot?.absolutePath == root.absolutePath) return
+        persist() // save the outgoing chat under the old space
+        sessionRoot = root
+        // The outgoing chat's id must not leak into the new space — its index
+        // decides which session opens here.
+        sessionId = null
+        _activeSessionId.value = null
+        migrateLegacySession(root)
+        readIndex()
+        restoreActiveOrFresh()
     }
 
     fun addNotice(text: String) {
@@ -267,7 +405,7 @@ class AgentEngine(
 
     // ---- turn loop --------------------------------------------------------
 
-    private suspend fun runTurn(userText: String) {
+    private suspend fun runTurn(userText: String, entryAlreadyAppended: Boolean = false) {
         val settings = settingsStore.settings.value
         val provider = settings.activeProvider
         val model = settings.activeModel.ifBlank { provider?.defaultModel.orEmpty() }
@@ -278,8 +416,11 @@ class AgentEngine(
         turnProject = null
         turnReason = userText.take(80)
 
-        appendEntry(ChatEntry(id = nextId++, kind = EntryKind.USER, text = userText))
+        if (!entryAlreadyAppended) {
+            appendEntry(ChatEntry(id = nextId++, kind = EntryKind.USER, text = userText))
+        }
         history += ChatMessage(role = Role.USER, text = userText)
+        if (sessionTitle.isBlank()) sessionTitle = deriveTitle(userText)
 
         if (provider == null || model.isBlank()) {
             appendEntry(
@@ -290,6 +431,7 @@ class AgentEngine(
                 ),
             )
             persist()
+            drainPendingQueue()
             return
         }
 
@@ -340,7 +482,16 @@ class AgentEngine(
             updateStreamingEntries()
             finishTurnReview()
             persist()
+            drainPendingQueue()
         }
+    }
+
+    /** Sends the next queued message, if any, once the running turn is over. */
+    private fun drainPendingQueue() {
+        val next = pendingQueue.removeFirstOrNull() ?: return
+        if (_isRunning.value) return
+        lastPrompt = next
+        turnJob = scope.launch { runTurn(userText = next, entryAlreadyAppended = true) }
     }
 
     /**
@@ -404,11 +555,16 @@ class AgentEngine(
         val calls = mutableListOf<ToolCall>()
         var failure: String? = null
 
+        // Coalesce UI patches: streaming tokens can arrive dozens per second, and
+        // each patch copies the whole entry list. Patching at most every 50 ms keeps
+        // long chats smooth; the final flush below always delivers the full text.
+        var lastUiPatch = 0L
+
         ProviderRegistry.forConfig(provider).stream(
             config = provider,
             model = model,
             systemPrompt = buildSystemPrompt(),
-            messages = history.toList(),
+            messages = wireHistory(),
             tools = availableToolSpecs(),
             temperature = temperature,
             maxTokens = maxTokens,
@@ -416,12 +572,20 @@ class AgentEngine(
             when (event) {
                 is LlmEvent.TextDelta -> {
                     text.append(event.text)
-                    patchEntry(entryId) { it.copy(text = text.toString()) }
+                    val now = System.nanoTime()
+                    if (now - lastUiPatch > STREAM_PATCH_INTERVAL_NANOS) {
+                        lastUiPatch = now
+                        patchEntry(entryId) { it.copy(text = text.toString()) }
+                    }
                 }
 
                 is LlmEvent.ReasoningDelta -> {
                     reasoning.append(event.text)
-                    patchEntry(entryId) { it.copy(reasoning = reasoning.toString()) }
+                    val now = System.nanoTime()
+                    if (now - lastUiPatch > STREAM_PATCH_INTERVAL_NANOS) {
+                        lastUiPatch = now
+                        patchEntry(entryId) { it.copy(reasoning = reasoning.toString()) }
+                    }
                 }
 
                 is LlmEvent.ToolCallReady -> calls += event.call
@@ -432,7 +596,10 @@ class AgentEngine(
             }
         }
 
-        patchEntry(entryId) { it.copy(streaming = false) }
+        // Full flush: whatever the throttle skipped lands here, exactly once.
+        patchEntry(entryId) {
+            it.copy(text = text.toString(), reasoning = reasoning.toString(), streaming = false)
+        }
 
         if (failure != null) {
             // Drop the empty assistant bubble; the error entry carries the detail.
@@ -455,6 +622,31 @@ class AgentEngine(
 
         history += ChatMessage(role = Role.ASSISTANT, text = text.toString(), toolCalls = calls)
         return calls
+    }
+
+    /**
+     * History as sent on the wire. Tool results the model already consumed are
+     * compacted — a long build turn otherwise re-ships megabytes of file contents
+     * with every step, which is the single biggest cause of slow requests.
+     */
+    private fun wireHistory(): List<ChatMessage> {
+        val toolIndexes = history.withIndex()
+            .filter { it.value.role == Role.TOOL }
+            .map { it.index }
+        if (toolIndexes.size <= RECENT_TOOL_RESULTS) return history.toList()
+        val recent = toolIndexes.takeLast(RECENT_TOOL_RESULTS).toHashSet()
+        return history.mapIndexed { index, message ->
+            if (index !in recent && message.role == Role.TOOL) {
+                message.copy(
+                    toolResult = message.toolResult?.let { result ->
+                        if (result.content.length <= STALE_TOOL_RESULT_CHARS) result
+                        else result.copy(content = result.content.take(STALE_TOOL_RESULT_CHARS) + STALE_TOOL_SUFFIX)
+                    },
+                )
+            } else {
+                message
+            }
+        }
     }
 
     private enum class CallOutcome { DONE, FAILED, DENIED }
@@ -543,9 +735,21 @@ class AgentEngine(
             project = workspace.activeProject.value,
             onProgress = { progress -> _status.value = "$summary — $progress" },
             onProjectChanged = { path ->
+                val newRoot = File(path, SESSION_DIR)
+                if (sessionRoot?.absolutePath != newRoot.absolutePath) {
+                    // Checkpoint the transcript under the old project's session list,
+                    // then repoint BEFORE selectByPath so the bindProject triggered
+                    // by the project switch is a no-op and the running turn keeps
+                    // its context. The transcript continues as its own session in
+                    // the new project instead of overwriting anything there.
+                    persist()
+                    sessionRoot = newRoot
+                    sessionId = generateSessionId()
+                    _activeSessionId.value = sessionId
+                    readIndex()
+                }
                 workspace.selectByPath(path)
                 settingsStore.update { it.copy(lastProjectPath = path) }
-                sessionDir = File(path, SESSION_DIR)
             },
         )
 
@@ -662,13 +866,20 @@ class AgentEngine(
 
     // ---- system prompt ----------------------------------------------------
 
-    /** Tool specs on offer right now; Chat Only trims the list to skills. */
-    private fun availableToolSpecs() =
+    /**
+     * Tool specs on offer right now. Chat Only trims the list to skills; the 15
+     * `github_*` tools are withheld while signed out — they would only burn prompt
+     * tokens the model can never use, and the system prompt says how to sign in.
+     */
+    private fun availableToolSpecs(): List<ToolSpec> {
         if (settingsStore.settings.value.chatOnly) {
-            listOf(UseSkillTool.toSpec())
-        } else {
-            ToolRegistry.specs()
+            return listOf(UseSkillTool.toSpec())
         }
+        val signedIn = github.client.value != null
+        return ToolRegistry.specs().let { specs ->
+            if (signedIn) specs else specs.filterNot { it.name.startsWith("github_") }
+        }
+    }
 
     private suspend fun buildSystemPrompt(): String {
         val settings = settingsStore.settings.value
@@ -693,68 +904,33 @@ class AgentEngine(
         }
 
         return buildString {
-            // 1. The curated agent handbook (bundled INSTRUCTION.md, user-editable).
-            if (settings.useSystemPrompt) {
-                val base = instructions.text.value.trim()
-                if (base.isNotEmpty()) {
-                    appendLine(base.take(InstructionStore.MAX_PROMPT_CHARS))
-                    appendLine()
-                    appendLine(
-                        "The handbook above defines HOW you behave. The DEVICE FACTS below " +
-                            "describe what is actually true of THIS execution environment; " +
-                            "where the two disagree about concrete capabilities, the device facts win.",
-                    )
-                    appendLine()
+            // 1. Operating rules. Fast mode swaps the ~23 KB handbook + device facts
+            // for a condensed briefing — the request leaves (and the first token
+            // arrives) much sooner, at the cost of less agent guidance.
+            if (settings.fastMode) {
+                appendLine(FAST_MODE_BRIEFING)
+                appendLine()
+            } else {
+                if (settings.useSystemPrompt) {
+                    val base = instructions.text.value.trim()
+                    if (base.isNotEmpty()) {
+                        appendLine(base.take(InstructionStore.MAX_PROMPT_CHARS))
+                        appendLine()
+                        appendLine(
+                            "The handbook above defines HOW you behave. The DEVICE FACTS below " +
+                                "describe what is actually true of THIS execution environment; " +
+                                "where the two disagree about concrete capabilities, the device facts win.",
+                        )
+                        appendLine()
+                    }
                 }
+
+                // 2. Device / runtime facts (the on-phone reality).
+                appendLine(DEVICE_FACTS)
+                appendLine()
             }
 
-            // 2. Device / runtime facts (the on-phone reality).
-            appendLine(
-                """
-                DEVICE EXECUTION FACTS — read this carefully, it is unusual:
-                - You run entirely on an Android phone. Commands go through `run_command`
-                  on the toybox shell inside a sandbox: working directory pinned to the
-                  project, fixed PATH, hard timeout, output caps. Basic inspection works
-                  (ls, cat, grep, find, wc). By default there is NO Node.js/npm, NO
-                  Python, NO JDK/Gradle, NO cargo/go — ecosystem installs and builds fail
-                  with 'not found'. Never pretend a build succeeded. (An optional Node
-                  runtime pack enables real dev servers — see dev_server_start below.)
-                - Every command is classified before it runs: read-only commands run
-                  immediately; anything that writes or installs asks the user;
-                  destructive commands and access outside the project are blocked.
-                  If a command was blocked, do not retry variations of it.
-                - `build_project` detects the project type and runs detect/install/build/
-                  test/run/clean with structured file:line diagnostics. For static web
-                  projects there is nothing to compile — use `preview` instead.
-                - For Node web apps (Vite/Next.js/React/Node), `dev_server_start` runs the
-                  real dev server IF a Node runtime is present: detects, installs, starts,
-                  sniffs the port, points Preview at it. On no_runtime fall back to
-                  `preview` for static, zero-build sites. Check dev_server_status;
-                  stop with dev_server_stop.
-                - Web projects must work by opening an HTML file directly. Get dependencies
-                  from a CDN (esm.sh, unpkg, jsdelivr) using an import map, or use a global
-                  script build. For React, JSX is compiled in-page by @babel/standalone;
-                  Tailwind via its CDN build (no PostCSS).
-                - Files live in a private sandbox for the active project. Paths are relative
-                  to the project root; `..` is rejected.
-                - Git goes through JGit over HTTPS only; SSH remotes fail.
-                - `preview` serves the project on 127.0.0.1 and the Preview tab auto-reloads
-                  after every write. Call it once the site is worth looking at.
-                - Screen is small: keep replies short, never dump whole files, never paste
-                  a file you just wrote.
-
-                PROJECT CREATION:
-                - You CAN build complete projects from scratch — this is expected here.
-                  When the user asks for any app/site/tool/game ("make me a to-do app",
-                  "build a portfolio site") with no suitable project open, call
-                  `create_project` with the closest template and flesh it out immediately.
-                  Scaffold first, ask questions later — wrong guesses are one edit away.
-                  After creating, keep building files until the thing actually works,
-                  then call `preview`.
-                """.trimIndent(),
-            )
-
-            appendLine()
+            // 3. Project state.
             if (project == null) {
                 appendLine("No project is open. Use create_project, git_clone or fetch_repo_snapshot to start one.")
             } else {
@@ -763,7 +939,7 @@ class AgentEngine(
                 appendLine("Templates available to create_project: ${Templates.ids.joinToString(", ")}.")
             }
 
-            // 3. Approval posture.
+            // 4. Approval posture.
             if (settings.autoApproveWrites) {
                 appendLine("File writes are auto-approved; the user is not asked before each change.")
             } else {
@@ -799,9 +975,9 @@ class AgentEngine(
             } else {
                 appendLine()
                 appendLine(
-                    "GITHUB tools are present but dormant: the user is not signed in. If a task clearly " +
-                        "needs issues/PRs/repo creation, say they can sign in from the Hub tab. Public " +
-                        "repos still clone fine with git_clone.",
+                    "GITHUB tools are not offered while the user is signed out. If a task clearly " +
+                        "needs issues/PRs/repo creation, say they can sign in from the Hub tab (the " +
+                        "tools appear after sign-in). Public repos still clone fine with git_clone.",
                 )
             }
         }
@@ -844,46 +1020,282 @@ class AgentEngine(
 
     // ---- persistence ------------------------------------------------------
 
-    /** Runs [NonCancellable] so a cancelled turn still saves what it produced. */
-    private suspend fun persist() = withContext(NonCancellable + Dispatchers.IO) {
-        val dir = sessionDir ?: return@withContext
-        runCatching {
-            dir.mkdirs()
-            File(dir, SESSION_FILE).writeText(
-                json.encodeToString(
-                    SessionSnapshot.serializer(),
-                    SessionSnapshot(_entries.value, history.toList()),
-                ),
+    /** Directory holding `<id>.json` files for the current session space. */
+    private fun sessionsDir(): File = File(sessionRoot ?: fallbackSessionsRoot, SESSIONS_SUBDIR)
+
+    /**
+     * Saves the open transcript as its session file and refreshes the index.
+     * Runs [NonCancellable] so a cancelled turn still saves what it produced.
+     * State is captured on the caller's (main) thread — only file IO hops to IO.
+     */
+    private suspend fun persist() {
+        val entries = _entries.value
+        val hasContent = entries.isNotEmpty() || history.isNotEmpty()
+        val id = sessionId ?: if (!hasContent) return else generateSessionId()
+        if (sessionId == null) {
+            sessionId = id
+            _activeSessionId.value = id
+        }
+        if (sessionCreatedAt == 0L) sessionCreatedAt = System.currentTimeMillis()
+        val root = sessionRoot ?: fallbackSessionsRoot
+        persistCaptured(id, sessionTitle, sessionCreatedAt, SessionSnapshot(entries, history.toList()), root, markActive = true)
+    }
+
+    /**
+     * Writes one captured snapshot to disk without touching live state. Used by
+     * [persist] and by [newSession] (which resets state first and must not flip
+     * the active marker to the chat it just archived).
+     */
+    private suspend fun persistCaptured(
+        id: String?,
+        title: String,
+        createdAt: Long,
+        snapshot: SessionSnapshot,
+        root: File = sessionRoot ?: fallbackSessionsRoot,
+        markActive: Boolean = false,
+    ) {
+        val sid = id ?: run {
+            if (snapshot.entries.isEmpty() && snapshot.history.isEmpty()) return
+            generateSessionId()
+        }
+        val stamp = System.currentTimeMillis()
+        val created = createdAt.takeIf { it != 0L } ?: stamp
+        withContext(NonCancellable + Dispatchers.IO) {
+            runCatching {
+                val dir = File(root, SESSIONS_SUBDIR)
+                dir.mkdirs()
+                File(dir, "$sid.json").writeText(
+                    json.encodeToString(
+                        SessionFile.serializer(),
+                        SessionFile(
+                            id = sid,
+                            title = title,
+                            createdAt = created,
+                            updatedAt = stamp,
+                            entries = snapshot.entries,
+                            history = snapshot.history,
+                        ),
+                    ),
+                )
+            }
+            writeIndex(root, markActive) { current ->
+                current.copy(
+                    sessions = (
+                        current.sessions.filterNot { it.id == sid } + SessionIndexEntry(
+                            id = sid,
+                            title = title,
+                            createdAt = created,
+                            updatedAt = stamp,
+                            messageCount = snapshot.entries.count {
+                                it.kind == EntryKind.USER || it.kind == EntryKind.ASSISTANT
+                            },
+                            preview = previewOf(snapshot.entries),
+                        )
+                        ).sortedByDescending { it.updatedAt }.take(MAX_SESSIONS),
+                )
+            }
+        }
+    }
+
+    /** Loads one session file into the engine. Returns false when unreadable. */
+    private suspend fun restoreSession(id: String): Boolean {
+        val loaded = withContext(Dispatchers.IO) {
+            val file = File(sessionsDir(), "$id.json")
+            if (!file.isFile) return@withContext null
+            runCatching { json.decodeFromString(SessionFile.serializer(), file.readText()) }.getOrNull()
+        }
+        if (loaded == null) return false
+        history.clear()
+        history += loaded.history
+        _entries.value = loaded.entries.map { if (it.streaming) it.copy(streaming = false) else it }
+        nextId = (loaded.entries.maxOfOrNull { it.id } ?: 0L) + 1L
+        sessionId = loaded.id
+        sessionTitle = loaded.title
+        sessionCreatedAt = loaded.createdAt
+        _activeSessionId.value = loaded.id
+        return true
+    }
+
+    /** Reads `sessions/index.json` into [sessions]; a missing index is just empty. */
+    private suspend fun readIndex(root: File = sessionRoot ?: fallbackSessionsRoot) {
+        val index = withContext(Dispatchers.IO) {
+            runCatching {
+                val file = File(root, INDEX_FILE)
+                if (file.isFile) json.decodeFromString(SessionIndex.serializer(), file.readText()) else SessionIndex()
+            }.getOrDefault(SessionIndex())
+        }
+        _sessions.value = index.sessions
+            .sortedByDescending { it.updatedAt }
+            .map {
+                SessionMeta(
+                    id = it.id,
+                    title = it.title,
+                    createdAt = it.createdAt,
+                    updatedAt = it.updatedAt,
+                    messageCount = it.messageCount,
+                    preview = it.preview,
+                )
+            }
+        if (sessionId == null) _activeSessionId.value = index.activeId
+    }
+
+    /** Reads, transforms and rewrites the index, then mirrors it into [sessions]. */
+    private suspend fun writeIndex(
+        root: File = sessionRoot ?: fallbackSessionsRoot,
+        markActive: Boolean = false,
+        transform: (SessionIndex) -> SessionIndex,
+    ) {
+        val next = withContext(Dispatchers.IO) {
+            runCatching {
+                val file = File(root, INDEX_FILE)
+                val current = if (file.isFile) {
+                    runCatching { json.decodeFromString(SessionIndex.serializer(), file.readText()) }
+                        .getOrDefault(SessionIndex())
+                } else {
+                    SessionIndex()
+                }
+                val transformed = transform(current).let {
+                    if (markActive && sessionId != null) it.copy(activeId = sessionId) else it
+                }
+                root.mkdirs()
+                file.writeText(json.encodeToString(SessionIndex.serializer(), transformed))
+                transformed
+            }.getOrNull()
+        } ?: return
+        _sessions.value = next.sessions
+            .sortedByDescending { it.updatedAt }
+            .map {
+                SessionMeta(
+                    id = it.id,
+                    title = it.title,
+                    createdAt = it.createdAt,
+                    updatedAt = it.updatedAt,
+                    messageCount = it.messageCount,
+                    preview = it.preview,
+                )
+            }
+        if (markActive && sessionId != null) _activeSessionId.value = sessionId
+    }
+
+    /** Drops one session from the index; the active chat stays whatever it is. */
+    private suspend fun removeFromIndex(id: String) {
+        writeIndex(markActive = false) { current ->
+            current.copy(
+                activeId = if (current.activeId == id) null else current.activeId,
+                sessions = current.sessions.filterNot { it.id == id },
             )
         }
     }
 
-    private suspend fun restore() = withContext(Dispatchers.IO) {
-        val file = sessionDir?.let { File(it, SESSION_FILE) }
-        if (file == null || !file.isFile) {
-            history.clear()
-            _entries.value = emptyList()
-            nextId = 1L
-            return@withContext
-        }
-        runCatching {
-            val snapshot = json.decodeFromString(SessionSnapshot.serializer(), file.readText())
-            history.clear()
-            history += snapshot.history
-            _entries.value = snapshot.entries.map {
-                if (it.streaming) it.copy(streaming = false) else it
+    /**
+     * One-time import of the pre-multi-session `<project>/.opencode/session.json`
+     * into the session store, so nobody loses their old chat on upgrade.
+     */
+    private suspend fun migrateLegacySession(root: File) {
+        withContext(Dispatchers.IO) {
+            val legacy = File(root, LEGACY_SESSION_FILE)
+            if (!legacy.isFile) return@withContext
+            runCatching {
+                val snapshot = json.decodeFromString(SessionSnapshot.serializer(), legacy.readText())
+                if (snapshot.entries.isNotEmpty() || snapshot.history.isNotEmpty()) {
+                    val id = generateSessionId()
+                    val stamp = legacy.lastModified().takeIf { it > 0 } ?: System.currentTimeMillis()
+                    val title = deriveTitle(
+                        snapshot.entries.firstOrNull { it.kind == EntryKind.USER }?.text ?: "Imported chat",
+                    )
+                    val dir = File(root, SESSIONS_SUBDIR)
+                    dir.mkdirs()
+                    File(dir, "$id.json").writeText(
+                        json.encodeToString(
+                            SessionFile.serializer(),
+                            SessionFile(id, title, stamp, stamp, snapshot.entries, snapshot.history),
+                        ),
+                    )
+                    writeIndex(root, markActive = false) { current ->
+                        current.copy(
+                            activeId = current.activeId ?: id,
+                            sessions = (
+                                current.sessions.filterNot { it.id == id } + SessionIndexEntry(
+                                    id = id,
+                                    title = title,
+                                    createdAt = stamp,
+                                    updatedAt = stamp,
+                                    messageCount = snapshot.entries.count {
+                                        it.kind == EntryKind.USER || it.kind == EntryKind.ASSISTANT
+                                    },
+                                    preview = previewOf(snapshot.entries),
+                                )
+                                ).sortedByDescending { it.updatedAt },
+                        )
+                    }
+                }
+                legacy.delete()
             }
-            nextId = (snapshot.entries.maxOfOrNull { it.id } ?: 0L) + 1L
-        }.onFailure {
-            history.clear()
-            _entries.value = emptyList()
-            nextId = 1L
         }
     }
 
+    /** Loads the index's active session, or starts a fresh canvas. */
+    private suspend fun restoreActiveOrFresh() {
+        val active = _activeSessionId.value
+        resetTranscript()
+        if (active == null) return
+        if (!restoreSession(active)) {
+            _activeSessionId.value = null
+        }
+    }
+
+    private fun resetTranscript() {
+        history.clear()
+        _entries.value = emptyList()
+        _pendingReview.value = null
+        turnCheckpoint = null
+        turnProject = null
+        sessionId = null
+        sessionTitle = ""
+        sessionCreatedAt = 0L
+        _activeSessionId.value = null
+        nextId = 1L
+    }
+
+    // ---- small helpers ----------------------------------------------------
+
+    private fun generateSessionId(): String =
+        "s${System.currentTimeMillis().toString(36)}-${(0..0xFFFF).random().toString(16)}"
+
+    /** Session title from the first user message: first line, whitespace-collapsed. */
+    private fun deriveTitle(text: String): String =
+        text.lineSequence().firstOrNull()?.trim()
+            ?.replace(Regex("\\s+"), " ")
+            ?.take(60)
+            .orEmpty()
+            .ifBlank { "New chat" }
+
+    /** One-line preview for the Sessions list: the latest thing the user said. */
+    private fun previewOf(entries: List<ChatEntry>): String =
+        entries.lastOrNull { it.kind == EntryKind.USER }?.text
+            ?.replace(Regex("\\s+"), " ")
+            ?.take(100)
+            .orEmpty()
+
     private companion object {
         const val SESSION_DIR = ".opencode"
-        const val SESSION_FILE = "session.json"
+        const val SESSIONS_SUBDIR = "sessions"
+        const val INDEX_FILE = "index.json"
+
+        /** Pre-multi-session transcript; imported once, then deleted. */
+        const val LEGACY_SESSION_FILE = "session.json"
+
+        /** Session catalog cap — keeps index reads O(small) forever. */
+        const val MAX_SESSIONS = 200
+
+        /** How often the streaming UI is allowed to re-patch the entry list. */
+        const val STREAM_PATCH_INTERVAL_NANOS = 50_000_000L
+
+        /** Tool results older than the last [RECENT_TOOL_RESULTS] calls are cut to this. */
+        const val STALE_TOOL_RESULT_CHARS = 900
+        const val STALE_TOOL_SUFFIX = "\n…(older tool output truncated to save context)"
+        const val RECENT_TOOL_RESULTS = 4
+
         const val MAX_TOOL_RESULT_CHARS = 30_000
         const val MAX_PROGRESS_LINES = 6
         const val REVIEW_BAR_FILES = 8
@@ -895,5 +1307,80 @@ class AgentEngine(
             DeletePathTool.name,
             CreateDirectoryTool.name,
         )
+
+        /** Condensed operating briefing sent in Fast mode (default on). */
+        const val FAST_MODE_BRIEFING = """
+You are OpenCode, a pragmatic coding agent running entirely on an Android phone. Be concise.
+
+DEVICE FACTS (these override any other assumption):
+- Commands run in a sandboxed toybox shell: ls/cat/grep/find/wc work; by default
+  there is NO Node/npm, Python, JDK/Gradle, cargo or go — ecosystem commands
+  fail with 'not found'. Never pretend a build succeeded.
+- Mutating file operations and non-read-only commands ask the user first;
+  destructive commands and paths outside the project are blocked outright.
+  Do not retry a blocked command.
+- Web projects must run with ZERO build step: dependencies from CDNs (esm.sh,
+  unpkg, jsdelivr) via import map, React JSX compiled in-page with
+  @babel/standalone, Tailwind via its CDN build. Call `preview` once the site
+  is worth looking at (the Preview tab auto-reloads after every write).
+- Paths are relative to the active project root; `..` is rejected. Git is
+  JGit over HTTPS only. `build_project` reports structured diagnostics for the
+  detected project type.
+- dev_server_start runs a real dev server only when a Node runtime pack is
+  present; otherwise fall back to `preview`. Check dev_server_status first.
+- Small screen: keep replies short, never dump whole files.
+
+WORKFLOW:
+- Inspect before editing (list_files, read_file, search_code); make minimal,
+  targeted edits; verify what you changed; say clearly what to check next.
+- When the user asks for any app/site/tool/game with no suitable project open,
+  call `create_project` with the closest template, keep building until it
+  actually works, then call `preview`. Scaffold first, ask later.
+- Never ask the user for API keys or tokens; you cannot and must not use them.
+"""
+
+        /** Full device/runtime facts block (non-fast mode). */
+        const val DEVICE_FACTS = """
+DEVICE EXECUTION FACTS — read this carefully, it is unusual:
+- You run entirely on an Android phone. Commands go through `run_command`
+  on the toybox shell inside a sandbox: working directory pinned to the
+  project, fixed PATH, hard timeout, output caps. Basic inspection works
+  (ls, cat, grep, find, wc). By default there is NO Node.js/npm, NO
+  Python, NO JDK/Gradle, NO cargo/go — ecosystem installs and builds fail
+  with 'not found'. Never pretend a build succeeded. (An optional Node
+  runtime pack enables real dev servers — see dev_server_start below.)
+- Every command is classified before it runs: read-only commands run
+  immediately; anything that writes or installs asks the user;
+  destructive commands and access outside the project are blocked.
+  If a command was blocked, do not retry variations of it.
+- `build_project` detects the project type and runs detect/install/build/
+  test/run/clean with structured file:line diagnostics. For static web
+  projects there is nothing to compile — use `preview` instead.
+- For Node web apps (Vite/Next.js/React/Node), `dev_server_start` runs the
+  real dev server IF a Node runtime is present: detects, installs, starts,
+  sniffs the port, points Preview at it. On no_runtime fall back to
+  `preview` for static, zero-build sites. Check dev_server_status;
+  stop with dev_server_stop.
+- Web projects must work by opening an HTML file directly. Get dependencies
+  from a CDN (esm.sh, unpkg, jsdelivr) using an import map, or use a global
+  script build. For React, JSX is compiled in-page by @babel/standalone;
+  Tailwind via its CDN build (no PostCSS).
+- Files live in a private sandbox for the active project. Paths are relative
+  to the project root; `..` is rejected.
+- Git goes through JGit over HTTPS only; SSH remotes fail.
+- `preview` serves the project on 127.0.0.1 and the Preview tab auto-reloads
+  after every write. Call it once the site is worth looking at.
+- Screen is small: keep replies short, never dump whole files, never paste
+  a file you just wrote.
+
+PROJECT CREATION:
+- You CAN build complete projects from scratch — this is expected here.
+  When the user asks for any app/site/tool/game ("make me a to-do app",
+  "build a portfolio site") with no suitable project open, call
+  `create_project` with the closest template and flesh it out immediately.
+  Scaffold first, ask questions later — wrong guesses are one edit away.
+  After creating, keep building files until the thing actually works,
+  then call `preview`.
+"""
     }
 }

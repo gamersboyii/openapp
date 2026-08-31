@@ -20,6 +20,7 @@ import dev.opencode.mobile.core.instructions.InstructionStore
 import dev.opencode.mobile.core.preview.PreviewServer
 import dev.opencode.mobile.core.settings.SettingsStore
 import dev.opencode.mobile.core.skills.SkillStore
+import java.io.File
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -78,6 +79,9 @@ class AppContainer(application: Application) {
         github = github,
         skills = skills,
         instructions = instructions,
+        // Session storage when no project is open, so Chat Only conversations
+        // and pre-project chats persist across restarts like project chats do.
+        fallbackSessionsRoot = File(application.filesDir, "chat-sessions"),
         scope = scope,
     )
 

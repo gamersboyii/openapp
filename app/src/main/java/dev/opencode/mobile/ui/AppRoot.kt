@@ -21,6 +21,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Chat
 import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Forum
@@ -76,6 +77,7 @@ import dev.opencode.mobile.ui.github.GitHubScreen
 import dev.opencode.mobile.ui.preview.PreviewScreen
 import dev.opencode.mobile.ui.projects.ProjectsScreen
 import dev.opencode.mobile.ui.review.ReviewScreen
+import dev.opencode.mobile.ui.sessions.SessionsScreen
 import dev.opencode.mobile.ui.settings.SettingsScreen
 import dev.opencode.mobile.ui.skills.SkillsScreen
 import dev.opencode.mobile.ui.terminal.TerminalScreen
@@ -93,6 +95,7 @@ object Routes {
     const val REVIEW = "review"
     const val CHECKPOINTS = "checkpoints"
     const val SKILLS = "skills"
+    const val SESSIONS = "sessions"
 
     fun editor(path: String): String = "$EDITOR?path=${android.net.Uri.encode(path)}"
 }
@@ -101,6 +104,7 @@ private data class DrawerItem(val route: String, val label: String, val icon: Im
 
 private val drawerItems = listOf(
     DrawerItem(Routes.CHAT, "Chat", Icons.Filled.Forum),
+    DrawerItem(Routes.SESSIONS, "Sessions", Icons.Filled.Chat),
     DrawerItem(Routes.FILES, "Files", Icons.Filled.Folder),
     DrawerItem(Routes.PREVIEW, "Preview", Icons.Filled.Visibility),
     DrawerItem(Routes.GITHUB, "Hub", Icons.Filled.Code),
@@ -133,13 +137,14 @@ fun AppRoot() {
     val isRunning by agent.isRunning.collectAsStateWithLifecycle()
     val status by agent.status.collectAsStateWithLifecycle()
 
-    // Editor, terminal, review, checkpoints and skills are full-screen pushes
-    // with their own headers; the shell top bar and drawer hide there.
+    // Editor, terminal, review, checkpoints, sessions and skills are full-screen
+    // pushes with their own headers; the shell top bar and drawer hide there.
     val route = currentRoute
     val fullScreen = route?.startsWith(Routes.EDITOR) == true ||
         route == Routes.TERMINAL ||
         route == Routes.REVIEW ||
         route == Routes.CHECKPOINTS ||
+        route == Routes.SESSIONS ||
         route == Routes.SKILLS
 
     val navigate: (String) -> Unit = { target ->
@@ -165,7 +170,7 @@ fun AppRoot() {
                     onNavigate = navigate,
                     onNewChat = {
                         scope.launch { drawerState.close() }
-                        agent.clear()
+                        agent.newSession()
                         navigate(Routes.CHAT)
                     },
                 )
@@ -190,7 +195,8 @@ fun AppRoot() {
                         },
                         onOpenDrawer = { scope.launch { drawerState.open() } },
                         onOpenSettings = { navigate(Routes.SETTINGS) },
-                        onNewChat = { agent.clear() },
+                        onOpenSessions = { navigate(Routes.SESSIONS) },
+                        onNewChat = { agent.newSession() },
                     )
                 }
             },
@@ -244,6 +250,7 @@ fun AppRoot() {
                             onOpenReview = { navigate(Routes.REVIEW) },
                             onOpenCheckpoints = { navigate(Routes.CHECKPOINTS) },
                             onOpenSkills = { navigate(Routes.SKILLS) },
+                            onOpenSessions = { navigate(Routes.SESSIONS) },
                         )
                     }
                     composable(Routes.FILES) {
@@ -273,6 +280,12 @@ fun AppRoot() {
                     composable(Routes.CHECKPOINTS) {
                         CheckpointsScreen(onBack = { navController.popBackStack() })
                     }
+                    composable(Routes.SESSIONS) {
+                        SessionsScreen(
+                            onBack = { navController.popBackStack() },
+                            onOpenChat = { navigate(Routes.CHAT) },
+                        )
+                    }
                     composable(Routes.SKILLS) {
                         SkillsScreen(onBack = { navController.popBackStack() })
                     }
@@ -291,7 +304,7 @@ fun AppRoot() {
 /**
  * Top bar exactly like the official app: hamburger on the left, a centered
  * tappable "opencode ▾" that opens the model picker (plus the Chat Only
- * switch), and a new-chat action on the right.
+ * switch), a sessions action and a new-chat action on the right.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -305,6 +318,7 @@ private fun OpenCodeTopBar(
     onToggleChatOnly: (Boolean) -> Unit,
     onOpenDrawer: () -> Unit,
     onOpenSettings: () -> Unit,
+    onOpenSessions: () -> Unit,
     onNewChat: () -> Unit,
 ) {
     var modelMenuOpen by remember { mutableStateOf(false) }
@@ -361,6 +375,9 @@ private fun OpenCodeTopBar(
             )
         },
         actions = {
+            IconButton(onClick = onOpenSessions) {
+                Icon(Icons.Filled.History, contentDescription = "Chat sessions")
+            }
             IconButton(onClick = onNewChat, enabled = canNewChat) {
                 Icon(Icons.Filled.Add, contentDescription = "New chat")
             }

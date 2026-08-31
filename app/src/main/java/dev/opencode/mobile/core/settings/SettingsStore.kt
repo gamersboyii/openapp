@@ -50,6 +50,13 @@ data class AppSettings(
     val customInstructions: String = "",
     /** Prepend the bundled INSTRUCTION.md handbook to every system prompt. */
     val useSystemPrompt: Boolean = true,
+    /**
+     * Fast mode (default on): send a condensed system prompt instead of the full
+     * ~23 KB handbook, trim github_* tool specs while signed out, and compact
+     * stale tool results. Cuts most of the dead prompt tokens that make every
+     * request slow to produce its first token.
+     */
+    val fastMode: Boolean = true,
     /** Chat Only: pure conversation, project tools stripped from the model. */
     val chatOnly: Boolean = false,
     /** Built-in skill ids whose descriptions ride along in every prompt. */

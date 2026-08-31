@@ -44,6 +44,7 @@ import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.GraphicEq
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Insights
 import androidx.compose.material.icons.filled.NotificationsActive
@@ -129,12 +130,14 @@ fun ChatScreen(
     onOpenReview: () -> Unit,
     onOpenCheckpoints: () -> Unit,
     onOpenSkills: () -> Unit = {},
+    onOpenSessions: () -> Unit = {},
 ) {
     val container = LocalContainer.current
     val agent = container.agent
 
     val entries by agent.entries.collectAsStateWithLifecycle()
     val isRunning by agent.isRunning.collectAsStateWithLifecycle()
+    val sessions by agent.sessions.collectAsStateWithLifecycle()
     val approval by agent.pendingApproval.collectAsStateWithLifecycle()
     val review by agent.pendingReview.collectAsStateWithLifecycle()
     val settings by container.settings.settings.collectAsStateWithLifecycle()
@@ -184,12 +187,23 @@ fun ChatScreen(
     }
 
     // Follow the tail only while the user is already there, so scrolling back
-    // through history is not yanked forward by each streamed token.
-    val tailSignal = entries.size to (entries.lastOrNull()?.text?.length ?: 0)
+    // through history is not yanked forward by each streamed token. A new entry
+    // animates smoothly; text growing inside the last entry snaps instead —
+    // restarting an animation on every token is what made streaming feel slow.
+    val lastEntry = entries.lastOrNull()
+    val tailSignal = entries.size to ((lastEntry?.text?.length ?: 0) + (lastEntry?.reasoning?.length ?: 0))
+    var lastEntryCount by remember { mutableStateOf(-1) }
     LaunchedEffect(tailSignal) {
         if (entries.isEmpty()) return@LaunchedEffect
         val lastVisible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
-        if (lastVisible >= entries.size - 3) listState.animateScrollToItem(entries.lastIndex)
+        if (lastVisible >= entries.size - 3) {
+            if (entries.size != lastEntryCount) {
+                listState.animateScrollToItem(entries.lastIndex)
+            } else {
+                listState.scrollToItem(entries.lastIndex)
+            }
+        }
+        lastEntryCount = entries.size
     }
 
     Column(modifier = Modifier.fillMaxSize()) {
@@ -197,7 +211,9 @@ fun ChatScreen(
             if (entries.isEmpty()) {
                 StarterPanel(
                     hasProvider = settings.activeProvider?.apiKey?.isNotBlank() == true,
+                    sessionCount = sessions.size,
                     onOpenSettings = onOpenSettings,
+                    onOpenSessions = onOpenSessions,
                     onPick = { draft = it },
                 )
             } else {
@@ -563,7 +579,9 @@ private fun BannerRow(
  * The floating capsule: rounded pill (#2F2F2F) holding, left to right, a plus
  * button, a camera button, a borderless "Message" field, and a trailing slot
  * that is a soundwave voice button while empty and an upright send arrow once
- * there is text. While the agent runs, the slot becomes stop (+ background).
+ * there is text. While the agent runs the slot becomes stop (+ background), and
+ * if the user types mid-run it shows stop + send — the message is queued and
+ * fires the moment the turn ends.
  */
 @Composable
 private fun Composer(
@@ -691,8 +709,23 @@ private fun Composer(
                     keyboardActions = KeyboardActions(onSend = { onSend() }),
                 )
 
-                // Far right: voice when empty, send when there is text.
+                // Far right: voice when empty, send when there is text. While a
+                // turn runs, typing shows stop + send — the message is displayed
+                // immediately and queued behind the running turn.
                 when {
+                    isRunning && value.isNotBlank() -> {
+                        RoundAction(
+                            icon = Icons.Filled.Stop,
+                            contentDescription = "Stop",
+                            onClick = onStop,
+                        )
+                        RoundAction(
+                            icon = Icons.Filled.ArrowUpward,
+                            contentDescription = "Queue message",
+                            onClick = onSend,
+                        )
+                    }
+
                     isRunning -> {
                         IconButton(onClick = { onRunInBackground(ctx) }) {
                             Icon(
@@ -756,7 +789,9 @@ private fun RoundAction(
 @Composable
 private fun StarterPanel(
     hasProvider: Boolean,
+    sessionCount: Int,
     onOpenSettings: () -> Unit,
+    onOpenSessions: () -> Unit,
     onPick: (String) -> Unit,
 ) {
     Column(modifier = Modifier.fillMaxSize().padding(horizontal = 24.dp)) {
@@ -800,6 +835,33 @@ private fun StarterPanel(
                                     "Gemini, Groq, DeepSeek or a custom endpoint.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+
+                if (sessionCount > 0) {
+                    Spacer(Modifier.height(10.dp))
+                    Surface(
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier.fillMaxWidth().clickable(onClick = onOpenSessions),
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Icon(
+                                Icons.Filled.History,
+                                contentDescription = null,
+                                modifier = Modifier.size(15.dp),
+                                tint = MaterialTheme.colorScheme.secondary,
+                            )
+                            Spacer(Modifier.width(10.dp))
+                            Text(
+                                "Past sessions ($sessionCount) — continue where you left off",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onBackground,
                             )
                         }
                     }

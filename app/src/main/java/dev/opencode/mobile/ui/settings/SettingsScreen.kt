@@ -412,12 +412,23 @@ fun SettingsScreen(onOpenSkills: () -> Unit = {}) {
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp),
             )
 
+            // ---- performance ------------------------------------------------
+            SectionHeader("Performance")
+            SettingSwitch(
+                title = "Fast mode",
+                subtitle = "Sends a condensed system prompt, hides GitHub tools while signed " +
+                    "out and compacts old tool output. Big speedup on every request; " +
+                    "turn off for the fullest agent guidance.",
+                checked = settings.fastMode,
+                onCheckedChange = { value -> store.update { it.copy(fastMode = value) } },
+            )
+
             // ---- system prompt handbook -------------------------------------
             SectionHeader("System prompt")
             SettingSwitch(
                 title = "Use agent handbook",
                 subtitle = "Prepend the bundled INSTRUCTION.md operating handbook to every " +
-                    "system prompt. Turn off for minimal prompts.",
+                    "system prompt. Ignored while Fast mode is on.",
                 checked = settings.useSystemPrompt,
                 onCheckedChange = { value -> store.update { it.copy(useSystemPrompt = value) } },
             )
@@ -438,6 +449,7 @@ fun SettingsScreen(onOpenSkills: () -> Unit = {}) {
                         Text("INSTRUCTION.md", style = MaterialTheme.typography.titleSmall)
                         Text(
                             text = when {
+                                settings.fastMode -> "bypassed by Fast mode"
                                 !settings.useSystemPrompt -> "disabled"
                                 instructionModified -> "edited"
                                 else -> "bundled version"
